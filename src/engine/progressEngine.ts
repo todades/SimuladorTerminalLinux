@@ -3,6 +3,9 @@
 // Motor de misiones gamificado con feedback de mascota
 // ============================================================
 
+import { api } from '../services/api';
+import { getCurrentSession } from './authEngine';
+
 export type TrayectoId = 1 | 2 | 3 | 4;
 
 export interface MissionStep {
@@ -43,9 +46,8 @@ export interface UserProgress {
   currentTrayecto: TrayectoId;
   currentLevel: number;
   trayectos: Trayecto[];
+  levels?: MissionLevel[];
 }
-
-const API_BASE = '/api/progress';
 
 // ─── TRAYECTO I: Fundamentos, Navegación, Gestión de Archivos y Permisos ──
 
@@ -563,18 +565,6 @@ export function createDefaultTrayectos(): Trayecto[] {
   ];
 }
 
-// ─── Backward compatibility ─────────────────────────────
-
-export interface MissionLevel {
-  id: number;
-  trayectoId: TrayectoId;
-  name: string;
-  description: string;
-  steps: MissionStep[];
-  unlocked: boolean;
-  completed: boolean;
-}
-
 export function createDefaultLevels(): MissionLevel[] {
   return createDefaultTrayectos().flatMap((t) => t.levels);
 }
@@ -594,12 +584,29 @@ export function calculateProgress(levels: MissionLevel[]): number {
   return total === 0 ? 0 : Math.round((completed / total) * 100);
 }
 
+export function getCompletedStepIds(levels: MissionLevel[]): string[] {
+  const ids: string[] = [];
+  for (const level of levels) {
+    for (const step of level.steps) {
+      if (step.completed) ids.push(step.id);
+    }
+  }
+  return ids;
+}
+
+export function getActiveLevelId(levels: MissionLevel[]): number {
+  const active = levels.find((l) => l.unlocked && !l.completed);
+  if (active) return active.id;
+  const lastCompleted = [...levels].reverse().find((l) => l.completed);
+  return lastCompleted ? lastCompleted.id : 1;
+}
+
 export function checkStepCompletion(
   levels: MissionLevel[],
   userInput: string,
 ): { stepCompleted: MissionStep | null; levels: MissionLevel[] } {
   const cleanInput = userInput.trim();
-  let completedStep: MissionStep | null = null as MissionStep | null;
+  let completedStep: MissionStep | null = null;
 
   for (const level of levels) {
     if (!level.unlocked) continue;
@@ -647,46 +654,53 @@ export function checkStepCompletion(
   return { stepCompleted: completedStep, levels };
 }
 
-// ─── API Sync (fetch) ─────────────────────────────────
+// ─── API Sync (Neon vía Render + localStorage de respaldo) ───
 
-export interface UserProgress {
-  completedSteps: string[];
-  progressPercent: number;
-  currentLevel: number;
-  levels: MissionLevel[];
-}
+export async function syncProgressToApi(
+  levels: MissionLevel[],
+  userId?: number | null,
+): Promise<boolean> {
+  const sessionUser = getCurrentSession() as (ReturnType<typeof getCurrentSession> & { id?: number }) | null;
+  const targetUserId = userId ?? sessionUser?.id ?? null;
 
-export async function fetchProgress(): Promise<UserProgress | null> {
-  try {
-    const res = await fetch(`${API_BASE}`);
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
+  const completedSteps = getCompletedStepIds(levels);
+  const progressPercent = calculateProgress(levels);
+  const currentLevel = getActiveLevelId(levels);
+
+  if (sessionUser?.email) {
+    try {
+      localStorage.setItem(
+        `upta_progress_v4_${sessionUser.email.toLowerCase()}`,
+        JSON.stringify({ completedSteps, progressPercent, currentLevel }),
+      );
+    } catch {
+      // ignore storage errors
+    }
   }
-}
 
-export async function syncStep(stepId: string): Promise<boolean> {
+  if (!targetUserId || targetUserId <= 0) {
+    return false;
+  }
+
   try {
-    const res = await fetch(`${API_BASE}/update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ step_id: stepId }),
+    await api.saveProgress({
+      user_id: targetUserId,
+      completed_steps: completedSteps,
+      progress_percent: progressPercent,
+      current_level: currentLevel,
     });
-    return res.ok;
-  } catch {
+    return true;
+  } catch (err) {
+    console.warn('Sincronización de progreso pendiente:', err);
     return false;
   }
 }
 
-export async function resetProgress(): Promise<boolean> {
-  try {
-    const res = await fetch(`${API_BASE}/reset`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+export async function syncStep(levels: MissionLevel[], userId?: number | null): Promise<boolean> {
+  return syncProgressToApi(levels, userId);
+}
+
+export async function resetProgress(userId?: number | null): Promise<boolean> {
+  const freshLevels = createDefaultLevels();
+  return syncProgressToApi(freshLevels, userId);
 }
