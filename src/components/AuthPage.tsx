@@ -700,6 +700,3 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     </div>
   );
 }
-```[cite: 18]
-
-Guarda el archivo, haz `git push` a `main` para que Render redespliegue el Static Site y prueba registrarte con un **correo nuevo** (ya que `josefernandez@gmail.com` quedó guardado antes). ¿Te aviso si necesitas ajustar algo más al probarlo?
