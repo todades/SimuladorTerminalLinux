@@ -56,6 +56,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [showPwd, setShowPwd] = useState(false);
   const [bootPhase, setBootPhase] = useState(0);
+  const [submittingReg, setSubmittingReg] = useState(false);
 
   // Login
   const [loginEmail, setLoginEmail] = useState('');
@@ -67,9 +68,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
   const [password, setPassword] = useState('');
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [regGeneralErr, setRegGeneralErr] = useState('');
-  // Tipo de cuenta solicitada
   const [reqRole, setReqRole] = useState<RequestedRole>('estudiante');
-  // Pantalla de confirmación tras solicitar cuenta docente
   const [pendingNotice, setPendingNotice] = useState<string | null>(null);
   const isTeacherReq = reqRole === 'profesor';
 
@@ -79,7 +78,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     return () => clearInterval(i);
   }, []);
 
-  // ─── Validadores ────────────────────────────────────
   const vEmail  = (v: string) => /^[a-zA-Z0-9._%+\-]+@gmail\.com$/.test(v.trim());
   const vCedula = (v: string) => /^\d{8}$/.test(v);
   const vTel    = (v: string) => isValidPhone(v);
@@ -88,13 +86,11 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     v.length >= 12 && /[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v) &&
     /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(v);
 
-  // Docentes disponibles para el Trayecto seleccionado
   const availableTeachers = useMemo(
     () => getTeachersByTrayecto(form.trayecto),
     [form.trayecto],
   );
 
-  // Preseleccionar el primer docente del Trayecto
   useEffect(() => {
     if (!form.teacherEmail && availableTeachers.length > 0) {
       setForm((p) => ({ ...p, teacherEmail: availableTeachers[0].email }));
@@ -109,7 +105,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     if (!vCedula(form.cedula))  e.cedula   = 'La cédula debe tener exactamente 8 dígitos.';
     if (!vTel(form.telefono))   e.telefono = PHONE_HINT;
     if (!vPass(password))       e.password = 'Mín 12 caracteres: mayúscula, minúscula, número y símbolo.';
-    // El docente no elige Trayecto ni titular: el SuperAdmin se lo asigna al aprobar
     if (!isTeacherReq && availableTeachers.length > 0 && !form.teacherEmail) {
       e.teacherEmail = 'Debes seleccionar tu docente titular.';
     }
@@ -117,7 +112,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     return Object.keys(e).length === 0;
   }, [form, password, availableTeachers, isTeacherReq]);
 
-  // ─── LOGIN SUBMIT (Estricto: No deja entrar si credenciales son inválidas) ───
   const submitLogin = (ev: React.FormEvent) => {
     ev.preventDefault();
     setLoginErr('');
@@ -131,45 +125,53 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     if (!res.success) {
       setLoginErr(res.error || 'Correo o contraseña incorrectos.');
       playSound('error');
-      return; // ⛔ NO DEJA ENTRAR
+      return;
     }
 
-    // Login exitoso
     playSound('boot');
     onAuthSuccess(res.user!);
   };
 
-  // ─── REGISTER SUBMIT (Guarda todos los datos y valida duplicados) ───
-  const submitRegister = (ev: React.FormEvent) => {
+  const submitRegister = async (ev: React.FormEvent) => {
     ev.preventDefault();
+    if (submittingReg) return;
+
     setRegGeneralErr('');
     if (!validate()) {
       playSound('error');
-      return; // ⛔ NO DEJA CREAR SI HAY CAMPOS MAL FORMADOS
-    }
-
-    const res = registerUser({
-      ...form,
-      password,
-      requestedRole: reqRole,
-    });
-
-    if (!res.success) {
-      setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
-      playSound('error');
-      return; // ⛔ NO DEJA CREAR SI YA EXISTE CORREO/CÉDULA/TELÉFONO
-    }
-
-    // Solicitud docente: NO inicia sesión, queda pendiente de autorización
-    if (reqRole === 'profesor') {
-      playSound('success');
-      setPendingNotice(form.email);
       return;
     }
 
-    // Registro de estudiante: acceso inmediato
-    playSound('boot');
-    onAuthSuccess(res.user!);
+    setSubmittingReg(true);
+    try {
+      const res = await registerUser({
+        ...form,
+        password,
+        requestedRole: reqRole,
+      });
+
+      if (!res.success || !res.user) {
+        setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
+        playSound('error');
+        return;
+      }
+
+      if (reqRole === 'profesor') {
+        playSound('success');
+        setPendingNotice(form.email);
+        return;
+      }
+
+      playSound('boot');
+      onAuthSuccess(res.user);
+    } catch (err) {
+      setRegGeneralErr(
+        err instanceof Error ? err.message : 'No se pudo crear la cuenta.',
+      );
+      playSound('error');
+    } finally {
+      setSubmittingReg(false);
+    }
   };
 
   const set = (k: keyof RegisterPayload, v: string) => {
@@ -206,8 +208,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
   };
 
   const baseInput = 'w-full bg-[#13161f] border rounded-xl px-4 py-2.5 text-white text-sm font-body placeholder:text-[#475569] focus:outline-none smooth-transition';
-
-
 
   return (
     <div className="min-h-screen bg-[#0d0f14] flex halo-both">
@@ -267,7 +267,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             </div>
 
-            {/* Alerta de Error de Autenticación */}
             {loginErr && (
               <div className="bg-[#f87171]/15 border border-[#f87171]/40 rounded-xl p-3.5 flex items-start gap-2.5">
                 <span className="text-[#f87171] text-base shrink-0">⚠️</span>
@@ -279,7 +278,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               Entrar al Laboratorio
             </button>
 
-            {/* Cuentas demo por rol */}
             <div className="mt-5 bg-[#0e111a] border border-[#1f2430] rounded-2xl p-4">
               <span className="text-[11px] font-bold text-[#a78bfa] font-ui block mb-2">
                 💡 Cuentas de Demostración por Rol
@@ -363,7 +361,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
 
         {tab === 'register' && !pendingNotice && (
           <form onSubmit={submitRegister} className="space-y-3 fade-up">
-            {/* ─── Tipo de cuenta solicitada ─── */}
             <div>
               <label className="block text-[11px] text-[#94a3b8] mb-1.5 font-body">
                 Tipo de cuenta
@@ -478,7 +475,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                   <span className={`absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold ${mark('telefono').cls}`}>{mark('telefono').icon}</span>
                 </div>
 
-                {/* Prefijos válidos: clic para precargar */}
                 <div className="flex gap-1 mt-1.5">
                   {PHONE_PREFIXES.map((p) => {
                     const sel = form.telefono.startsWith(p);
@@ -509,7 +505,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
             </div>
 
             <div className={`grid gap-3 ${isTeacherReq ? 'grid-cols-1' : 'grid-cols-2'}`}>
-              {/* El docente NO elige Trayecto */}
               {!isTeacherReq && (
                 <div>
                   <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">Trayecto</label>
@@ -517,7 +512,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                     value={form.trayecto}
                     onChange={(e) => {
                       const t = e.target.value;
-                      // Al cambiar de Trayecto se reasigna el docente titular
                       const first = getTeachersByTrayecto(t)[0]?.email ?? '';
                       setForm((p) => ({ ...p, trayecto: t, teacherEmail: first }));
                       setErrs((p) => { const n = { ...p }; delete n.teacherEmail; return n; });
@@ -544,7 +538,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             </div>
 
-            {/* Docente titular del Trayecto (FK teacher_id) — solo estudiantes */}
             {!isTeacherReq && (
               <div>
                 <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">
@@ -600,7 +593,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               {errs.password && <p className="text-[10px] text-[#f87171] mt-1 font-body">{errs.password}</p>}
             </div>
 
-            {/* Mascota */}
             <div>
               <label className="block text-[11px] text-[#94a3b8] mb-1.5 font-body">Elige tu Mascota Guía</label>
               <div className="grid grid-cols-4 gap-2">
@@ -634,13 +626,20 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             </div>
 
-            {/* Vista previa */}
             <div className="bg-[#13161f] rounded-2xl p-4 border border-[#1f2430] flex justify-center">
               <Mascot species={form.mascotSpecies} gender={form.mascotGender} animation="float" size={100} showName />
             </div>
 
-            <button type="submit" className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg">
-              {isTeacherReq ? '📨 Enviar Solicitud de Docente' : 'Crear Cuenta y Entrar'}
+            <button
+              type="submit"
+              disabled={submittingReg}
+              className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg disabled:opacity-60"
+            >
+              {submittingReg
+                ? 'Creando cuenta...'
+                : isTeacherReq
+                  ? '📨 Enviar Solicitud de Docente'
+                  : 'Crear Cuenta y Entrar'}
             </button>
           </form>
         )}
@@ -701,3 +700,6 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     </div>
   );
 }
+```[cite: 18]
+
+Guarda el archivo, haz `git push` a `main` para que Render redespliegue el Static Site y prueba registrarte con un **correo nuevo** (ya que `josefernandez@gmail.com` quedó guardado antes). ¿Te aviso si necesitas ajustar algo más al probarlo?
