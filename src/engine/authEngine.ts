@@ -961,9 +961,9 @@ export interface AuthResult {
 }
 
 /**
- * Registrar un nuevo estudiante (o solicitud docente)
+ * Registrar un nuevo usuario sincronizando con la API / Neon PostgreSQL
  */
-export function registerUser(payload: {
+export async function registerUser(payload: {
   nombre: string;
   apellido: string;
   email: string;
@@ -976,7 +976,8 @@ export function registerUser(payload: {
   mascotGender: MascotGender;
   teacherEmail?: string;
   requestedRole?: 'estudiante' | 'profesor';
-}): AuthResult {
+  sectionId?: number | null;
+}): Promise<AuthResult> {
   const emailLower = payload.email.trim().toLowerCase();
 
   if (!/^[a-zA-Z0-9._%+\-]+@gmail\.com$/.test(emailLower)) {
@@ -1019,8 +1020,35 @@ export function registerUser(payload: {
   }
 
   const isTeacherRequest = payload.requestedRole === 'profesor';
+  const role: 'estudiante' | 'profesor' = isTeacherRequest ? 'profesor' : 'estudiante';
+  const fullName = `${payload.nombre.trim()} ${payload.apellido.trim()}`.trim();
+
+  let createdUserId: number | undefined;
+
+  try {
+    const apiUser = await api.register({
+      full_name: fullName,
+      email: emailLower,
+      cedula: payload.cedula.trim(),
+      role,
+      trayecto: isTeacherRequest ? '' : payload.trayecto,
+      section_id: payload.sectionId ?? null,
+      mascot_name: payload.mascotSpecies,
+      mascot_gender: payload.mascotGender,
+    });
+    createdUserId = apiUser.id;
+  } catch (err) {
+    return {
+      success: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'No se pudo registrar la cuenta en el servidor.',
+    };
+  }
 
   const newUser: RegisteredUser = {
+    id: createdUserId,
     nombre: payload.nombre.trim(),
     apellido: payload.apellido.trim(),
     email: emailLower,
@@ -1032,14 +1060,14 @@ export function registerUser(payload: {
     mascotSpecies: payload.mascotSpecies,
     mascotGender: payload.mascotGender,
     registeredAt: new Date().toISOString(),
-    role: isTeacherRequest ? 'profesor' : 'estudiante',
+    role,
     active: !isTeacherRequest,
     approvalStatus: isTeacherRequest ? 'pending' : 'approved',
     teacherEmail: isTeacherRequest
       ? null
-      : (payload.teacherEmail?.trim().toLowerCase()
-        ?? getTeachersByTrayecto(payload.trayecto)[0]?.email
-        ?? null),
+      : (payload.teacherEmail?.trim().toLowerCase() ??
+        getTeachersByTrayecto(payload.trayecto)[0]?.email ??
+        null),
   };
 
   const db = getUsersDb();
@@ -1057,35 +1085,12 @@ export function registerUser(payload: {
     return { success: true, user: newUser };
   }
 
-  void api
-    .register({
-      full_name: `${newUser.nombre} ${newUser.apellido}`.trim(),
-      email: newUser.email,
-      cedula: newUser.cedula,
-      role: newUser.role,
-      trayecto: newUser.trayecto,
-      mascot_name: newUser.mascotSpecies,
-      mascot_gender: newUser.mascotGender,
-    })
-    .then((remoteUser) => {
-      if (remoteUser?.id) {
-        newUser.id = remoteUser.id;
-        const updatedDb = getUsersDb();
-        updatedDb[emailLower] = newUser;
-        saveUsersDb(updatedDb);
-        setCurrentSession(newUser);
-      }
-    })
-    .catch((err) => {
-      console.warn('Registro sincronizado localmente (pendiente en nube):', err);
-    });
-
   setCurrentSession(newUser);
   return { success: true, user: newUser };
 }
 
 /**
- * Iniciar sesión comprobando correo y contraseña y sincronizando con la API
+ * Iniciar sesión comprobando correo y contraseña en la base de datos de usuarios registrados
  */
 export function loginUser(email: string, password: string): AuthResult {
   const emailLower = email.trim().toLowerCase();
@@ -1139,23 +1144,6 @@ export function loginUser(email: string, password: string): AuthResult {
   saveUsersDb(db);
   setCurrentSession(db[emailLower]);
   startSession(emailLower);
-
-  void api
-    .login(emailLower)
-    .then((remoteUser) => {
-      if (remoteUser?.id) {
-        const currentDb = getUsersDb();
-        if (currentDb[emailLower]) {
-          currentDb[emailLower].id = remoteUser.id;
-          saveUsersDb(currentDb);
-          setCurrentSession(currentDb[emailLower]);
-        }
-      }
-    })
-    .catch((err) => {
-      console.warn('Login verificado localmente:', err);
-    });
-
   return { success: true, user: db[emailLower] };
 }
 
@@ -1166,9 +1154,7 @@ export function getCurrentSession(): RegisteredUser | null {
     const user = JSON.parse(raw) as RegisteredUser;
     if (!user || !user.email) return null;
     const verified = findUserByEmail(user.email);
-    if (!verified) return null;
-    if (user.id && !verified.id) verified.id = user.id;
-    return verified;
+    return verified || null;
   } catch {
     return null;
   }
@@ -1218,7 +1204,6 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
   const updated: RegisteredUser = {
     ...existing,
     ...safe,
-    id:             existing.id,
     email:          existing.email,
     cedula:         existing.cedula,
     trayecto:       existing.trayecto,
