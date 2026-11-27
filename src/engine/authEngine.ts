@@ -1,9 +1,10 @@
 // ============================================================
 // 🔐 AUTH ENGINE — Motor de Autenticación y Base de Datos de Usuarios
-// Almacenamiento local persistente con validación estricta de credenciales
+// Almacenamiento local persistente + sincronización con API / Neon
 // ============================================================
 
 import { MascotSpecies, MascotGender } from '../components/Mascot';
+import { api } from '../services/api';
 
 // ─── RBAC: 3 niveles de acceso ────────────────────────
 export type UserRole = 'estudiante' | 'profesor' | 'administrador';
@@ -91,6 +92,7 @@ export function getTrayectoMeta(trayecto?: string | null): TrayectoMeta {
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
 export interface RegisteredUser {
+  id?: number;
   nombre: string;
   apellido: string;
   email: string;
@@ -171,12 +173,10 @@ function hashPassword(password: string): string {
     hash = (hash << 5) - hash + char;
     hash |= 0;
   }
-  // Convertir a cadena hexadecimal base64-ish
   return `HASH_${Math.abs(hash).toString(16)}_${btoa(password).slice(0, 12)}`;
 }
 
 // ─── Cuentas demo: una por cada rol ──────────────────
-// Las cuentas sembradas nacen ya aprobadas.
 type SeedUser = Omit<RegisteredUser, 'approvalStatus'> & { approvalStatus?: ApprovalStatus };
 
 const DEMO_USERS: RegisteredUser[] = ([
@@ -281,7 +281,6 @@ export function logCommand(entry: CommandLogEntry): void {
     const raw = localStorage.getItem(CMD_LOG_KEY);
     const log: CommandLogEntry[] = raw ? JSON.parse(raw) : [];
     log.push(entry);
-    // Retener los últimos 2000 eventos
     localStorage.setItem(CMD_LOG_KEY, JSON.stringify(log.slice(-2000)));
   } catch { /* ignore */ }
 }
@@ -388,7 +387,6 @@ export function sendMessage(
   return { success: true };
 }
 
-/** Mensajes recibidos por un usuario (más recientes primero) */
 export function getInbox(email: string): Message[] {
   const key = email.trim().toLowerCase();
   return getMessages()
@@ -396,7 +394,6 @@ export function getInbox(email: string): Message[] {
     .sort((a, b) => b.sentAt - a.sentAt);
 }
 
-/** Conversación completa entre un docente y un estudiante */
 export function getThread(teacherEmail: string, studentEmail: string): Message[] {
   const t = teacherEmail.trim().toLowerCase();
   const s = studentEmail.trim().toLowerCase();
@@ -430,8 +427,8 @@ export interface SystemNotification {
   type: 'teacher_request' | 'teacher_approved' | 'teacher_rejected' | 'info';
   title: string;
   body: string;
-  targetEmail: string;      // destinatario de la notificación
-  relatedEmail?: string;    // usuario al que se refiere
+  targetEmail: string;
+  relatedEmail?: string;
   createdAt: number;
   read: boolean;
 }
@@ -491,7 +488,6 @@ export function dismissNotification(id: string): void {
 
 // ═══ Flujo de autorización de cuentas docentes ════════
 
-/** Solicitudes de docente pendientes de revisión */
 export function getPendingTeachers(): RegisteredUser[] {
   return Object.values(getUsersDb())
     .filter((u) => u.role === 'profesor' && u.approvalStatus === 'pending')
@@ -502,10 +498,6 @@ export function countPendingTeachers(): number {
   return getPendingTeachers().length;
 }
 
-/**
- * Aprueba una cuenta docente y le asigna su Trayecto/sección.
- * Solo puede ejecutarlo el SuperAdministrador.
- */
 export function approveTeacher(
   email: string,
   trayecto: string,
@@ -541,7 +533,6 @@ export function approveTeacher(
   return { success: true, user };
 }
 
-/** Rechaza una solicitud docente con motivo opcional */
 export function rejectTeacher(
   email: string,
   reviewerEmail: string,
@@ -572,21 +563,18 @@ export function rejectTeacher(
 
 // ═══ Jerarquía Docente → Estudiantes por Trayecto ═════
 
-/** Docentes activos que imparten un Trayecto dado */
 export function getTeachersByTrayecto(trayecto: string): RegisteredUser[] {
   return Object.values(getUsersDb())
     .filter((u) => u.role === 'profesor' && u.active && u.trayecto === trayecto)
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
 }
 
-/** Todos los docentes activos (para el selector de registro) */
 export function getAllTeachers(): RegisteredUser[] {
   return Object.values(getUsersDb())
     .filter((u) => u.role === 'profesor')
     .sort((a, b) => a.trayecto.localeCompare(b.trayecto) || a.nombre.localeCompare(b.nombre));
 }
 
-/** Estudiantes asignados a un docente */
 export function getStudentsByTeacher(teacherEmail: string): RegisteredUser[] {
   const key = teacherEmail.trim().toLowerCase();
   return Object.values(getUsersDb())
@@ -594,7 +582,6 @@ export function getStudentsByTeacher(teacherEmail: string): RegisteredUser[] {
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
 }
 
-/** Estudiantes sin docente titular asignado */
 export function getUnassignedStudents(): RegisteredUser[] {
   const teachers = new Set(getAllTeachers().map((t) => t.email));
   return Object.values(getUsersDb())
@@ -608,11 +595,6 @@ export interface TeacherAssignment {
   activeStudents: number;
 }
 
-/**
- * Matriz jerárquica Docente → Estudiantes.
- * Excluye a los docentes pendientes/rechazados: aún no tienen sección
- * y se gestionan en la bandeja de solicitudes.
- */
 export function getAssignmentMatrix(trayectoFilter?: string): TeacherAssignment[] {
   return getAllTeachers()
     .filter((t) => t.approvalStatus === 'approved')
@@ -627,7 +609,6 @@ export function getAssignmentMatrix(trayectoFilter?: string): TeacherAssignment[
     });
 }
 
-/** Reasigna un estudiante a otro docente titular */
 export function assignStudentToTeacher(
   studentEmail: string,
   teacherEmail: string | null,
@@ -674,11 +655,9 @@ export function getGlobalMetrics(): GlobalMetrics {
   const now = Date.now();
   const log = getCommandLog();
 
-  // Activos hoy: ejecutaron algún comando en las últimas 24 h
   const activeEmails = new Set(
     log.filter((e) => now - e.timestamp < DAY).map((e) => e.email),
   );
-  // En línea ahora: actividad en los últimos 5 minutos
   const onlineEmails = new Set(
     log.filter((e) => now - e.timestamp < 5 * 60000).map((e) => e.email),
   );
@@ -698,7 +677,6 @@ export function getGlobalMetrics(): GlobalMetrics {
   };
 }
 
-/** ¿Tuvo actividad en las últimas 24 h? */
 export function isActiveToday(email: string): boolean {
   const DAY = 86400000;
   const now = Date.now();
@@ -749,7 +727,6 @@ export function listAllUsers(): RegisteredUser[] {
     a.nombre.localeCompare(b.nombre));
 }
 
-/** Usuarios agrupados por rol, para la vista ordenada del admin */
 export function listUsersByRole(): {
   profesores: RegisteredUser[];
   estudiantes: RegisteredUser[];
@@ -763,10 +740,6 @@ export function listUsersByRole(): {
   };
 }
 
-/**
- * Solo se permite alternar entre estudiante y profesor.
- * El rol de administrador es exclusivo de ROOT_ADMIN_EMAIL.
- */
 export function changeUserRole(email: string, role: UserRole): AuthResult {
   const db = getUsersDb();
   const key = email.trim().toLowerCase();
@@ -801,7 +774,6 @@ export function toggleUserActive(email: string): AuthResult {
   return { success: true, user: db[key] };
 }
 
-/** Qué ocurrirá al eliminar una cuenta (previsualización para el diálogo) */
 export interface DeletionImpact {
   canDelete: boolean;
   reason?: string;
@@ -834,10 +806,6 @@ export function previewDeletion(email: string): DeletionImpact {
   };
 }
 
-/**
- * Elimina una cuenta y purga todos sus datos derivados.
- * Al borrar un docente, sus estudiantes quedan sin titular (no se eliminan).
- */
 export function deleteUser(email: string): AuthResult {
   const db = getUsersDb();
   const key = email.trim().toLowerCase();
@@ -848,7 +816,6 @@ export function deleteUser(email: string): AuthResult {
     return { success: false, error: 'La cuenta del administrador no puede eliminarse.' };
   }
 
-  // Cascada: liberar a los estudiantes del docente eliminado
   if (user.role === 'profesor') {
     for (const u of Object.values(db)) {
       if (u.role === 'estudiante' && u.teacherEmail === key) {
@@ -860,7 +827,6 @@ export function deleteUser(email: string): AuthResult {
   delete db[key];
   saveUsersDb(db);
 
-  // Purga de datos derivados
   try {
     localStorage.removeItem(`upta_progress_v4_${key}`);
 
@@ -880,7 +846,6 @@ export function deleteUser(email: string): AuthResult {
   return { success: true };
 }
 
-/** Activa o desactiva un docente junto con todos sus estudiantes */
 export function toggleTeacherCascade(email: string, active: boolean): AuthResult {
   const db = getUsersDb();
   const key = email.trim().toLowerCase();
@@ -901,7 +866,6 @@ export function toggleTeacherCascade(email: string, active: boolean): AuthResult
   return { success: true, user: teacher };
 }
 
-/** Acción masiva sobre varias cuentas */
 export function bulkToggleActive(emails: string[], active: boolean): number {
   const db = getUsersDb();
   let n = 0;
@@ -929,25 +893,20 @@ export function getUsersDb(): Record<string, RegisteredUser> {
     if (!parsed || typeof parsed !== 'object') return seedDb();
 
     let mutated = false;
-    // Garantizar que las 3 cuentas demo existan siempre
     for (const demo of DEMO_USERS) {
       if (!parsed[demo.email.toLowerCase()]) {
         parsed[demo.email.toLowerCase()] = demo;
         mutated = true;
       }
     }
-    // Migración: usuarios antiguos sin rol → estudiante
     for (const key of Object.keys(parsed)) {
       if (!parsed[key].role) { parsed[key].role = 'estudiante'; mutated = true; }
       if (parsed[key].active === undefined) { parsed[key].active = true; mutated = true; }
-      // Migración: cuentas previas al flujo de aprobación quedan aprobadas
       if (!parsed[key].approvalStatus) { parsed[key].approvalStatus = 'approved'; mutated = true; }
-      // Administrador único: degradar cualquier admin que no sea el raíz
       if (parsed[key].role === 'administrador' && key !== ROOT_ADMIN_EMAIL) {
         parsed[key].role = 'profesor';
         mutated = true;
       }
-      // El administrador raíz siempre activo y con su rol
       if (key === ROOT_ADMIN_EMAIL) {
         if (parsed[key].role !== 'administrador') { parsed[key].role = 'administrador'; mutated = true; }
         if (!parsed[key].active) { parsed[key].active = true; mutated = true; }
@@ -1002,7 +961,7 @@ export interface AuthResult {
 }
 
 /**
- * Registrar un nuevo estudiante
+ * Registrar un nuevo estudiante (o solicitud docente)
  */
 export function registerUser(payload: {
   nombre: string;
@@ -1016,12 +975,10 @@ export function registerUser(payload: {
   mascotSpecies: MascotSpecies;
   mascotGender: MascotGender;
   teacherEmail?: string;
-  /** 'estudiante' (por defecto) o 'profesor' (requiere autorización) */
   requestedRole?: 'estudiante' | 'profesor';
 }): AuthResult {
   const emailLower = payload.email.trim().toLowerCase();
 
-  // Validar que sea una cuenta @gmail.com
   if (!/^[a-zA-Z0-9._%+\-]+@gmail\.com$/.test(emailLower)) {
     return {
       success: false,
@@ -1029,17 +986,14 @@ export function registerUser(payload: {
     };
   }
 
-  // Validar el prefijo telefónico
   if (!isValidPhone(payload.telefono)) {
     return { success: false, error: PHONE_HINT };
   }
 
-  // Validar la cédula
   if (!/^\d{8}$/.test(payload.cedula.trim())) {
     return { success: false, error: 'La cédula debe tener exactamente 8 dígitos.' };
   }
 
-  // Validaciones de duplicados
   const existingEmail = findUserByEmail(emailLower);
   if (existingEmail) {
     return {
@@ -1071,7 +1025,6 @@ export function registerUser(payload: {
     apellido: payload.apellido.trim(),
     email: emailLower,
     cedula: payload.cedula.trim(),
-    // Los docentes no eligen Trayecto: el SuperAdmin les asigna sección al aprobar
     trayecto: isTeacherRequest ? '' : payload.trayecto,
     genero: payload.genero,
     telefono: payload.telefono.trim(),
@@ -1080,10 +1033,8 @@ export function registerUser(payload: {
     mascotGender: payload.mascotGender,
     registeredAt: new Date().toISOString(),
     role: isTeacherRequest ? 'profesor' : 'estudiante',
-    // La cuenta docente queda inactiva hasta la autorización
     active: !isTeacherRequest,
     approvalStatus: isTeacherRequest ? 'pending' : 'approved',
-    // Docente titular del Trayecto (FK teacher_id) — solo estudiantes
     teacherEmail: isTeacherRequest
       ? null
       : (payload.teacherEmail?.trim().toLowerCase()
@@ -1096,7 +1047,6 @@ export function registerUser(payload: {
   saveUsersDb(db);
 
   if (isTeacherRequest) {
-    // Notificar al SuperAdmin de la solicitud pendiente
     pushNotification({
       type: 'teacher_request',
       title: 'Nueva solicitud de cuenta docente',
@@ -1104,21 +1054,42 @@ export function registerUser(payload: {
       targetEmail: ROOT_ADMIN_EMAIL,
       relatedEmail: newUser.email,
     });
-    // No se inicia sesión: debe esperar aprobación
     return { success: true, user: newUser };
   }
+
+  void api
+    .register({
+      full_name: `${newUser.nombre} ${newUser.apellido}`.trim(),
+      email: newUser.email,
+      cedula: newUser.cedula,
+      role: newUser.role,
+      trayecto: newUser.trayecto,
+      mascot_name: newUser.mascotSpecies,
+      mascot_gender: newUser.mascotGender,
+    })
+    .then((remoteUser) => {
+      if (remoteUser?.id) {
+        newUser.id = remoteUser.id;
+        const updatedDb = getUsersDb();
+        updatedDb[emailLower] = newUser;
+        saveUsersDb(updatedDb);
+        setCurrentSession(newUser);
+      }
+    })
+    .catch((err) => {
+      console.warn('Registro sincronizado localmente (pendiente en nube):', err);
+    });
 
   setCurrentSession(newUser);
   return { success: true, user: newUser };
 }
 
 /**
- * Iniciar sesión comprobando correo y contraseña en la base de datos de usuarios registrados
+ * Iniciar sesión comprobando correo y contraseña y sincronizando con la API
  */
 export function loginUser(email: string, password: string): AuthResult {
   const emailLower = email.trim().toLowerCase();
 
-  // Validar formato Gmail antes de buscar en la BD
   if (!/^[a-zA-Z0-9._%+\-]+@gmail\.com$/.test(emailLower)) {
     return {
       success: false,
@@ -1143,7 +1114,6 @@ export function loginUser(email: string, password: string): AuthResult {
     };
   }
 
-  // Flujo de autorización docente
   if (user.approvalStatus === 'pending') {
     return {
       success: false,
@@ -1164,35 +1134,46 @@ export function loginUser(email: string, password: string): AuthResult {
     };
   }
 
-  // Credenciales válidas: registrar último acceso y abrir sesión
   const db = getUsersDb();
   db[emailLower].lastLogin = new Date().toISOString();
   saveUsersDb(db);
   setCurrentSession(db[emailLower]);
   startSession(emailLower);
+
+  void api
+    .login(emailLower)
+    .then((remoteUser) => {
+      if (remoteUser?.id) {
+        const currentDb = getUsersDb();
+        if (currentDb[emailLower]) {
+          currentDb[emailLower].id = remoteUser.id;
+          saveUsersDb(currentDb);
+          setCurrentSession(currentDb[emailLower]);
+        }
+      }
+    })
+    .catch((err) => {
+      console.warn('Login verificado localmente:', err);
+    });
+
   return { success: true, user: db[emailLower] };
 }
 
-/**
- * Obtener la sesión activa del estudiante
- */
 export function getCurrentSession(): RegisteredUser | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return null;
     const user = JSON.parse(raw) as RegisteredUser;
     if (!user || !user.email) return null;
-    // Verificar que siga existiendo en la base de usuarios
     const verified = findUserByEmail(user.email);
-    return verified || null;
+    if (!verified) return null;
+    if (user.id && !verified.id) verified.id = user.id;
+    return verified;
   } catch {
     return null;
   }
 }
 
-/**
- * Guardar sesión activa
- */
 export function setCurrentSession(user: RegisteredUser | null): void {
   try {
     if (!user) {
@@ -1205,20 +1186,10 @@ export function setCurrentSession(user: RegisteredUser | null): void {
   }
 }
 
-/**
- * Cerrar sesión
- */
 export function logoutUser(): void {
   localStorage.removeItem(SESSION_KEY);
 }
 
-/**
- * Actualizar el perfil desde la vista del usuario.
- *
- * Solo acepta campos de contacto y personalización. Los campos académicos
- * y de seguridad (trayecto, cédula, docente, rol, estado) se descartan:
- * únicamente la administración puede modificarlos.
- */
 export function updateUserProfile(email: string, updates: Partial<RegisteredUser>): AuthResult {
   const db = getUsersDb();
   const emailLower = email.trim().toLowerCase();
@@ -1227,7 +1198,6 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
     return { success: false, error: 'Usuario no encontrado.' };
   }
 
-  // Lista blanca de campos editables por el propio usuario
   const safe: Partial<RegisteredUser> = {};
   if (updates.nombre !== undefined)        safe.nombre = updates.nombre.trim();
   if (updates.apellido !== undefined)      safe.apellido = updates.apellido.trim();
@@ -1235,7 +1205,6 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
   if (updates.mascotSpecies !== undefined) safe.mascotSpecies = updates.mascotSpecies;
   if (updates.mascotGender !== undefined)  safe.mascotGender = updates.mascotGender;
 
-  // El teléfono debe tener prefijo válido y ser único
   if (safe.telefono && safe.telefono !== existing.telefono) {
     if (!isValidPhone(safe.telefono)) {
       return { success: false, error: PHONE_HINT };
@@ -1249,7 +1218,7 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
   const updated: RegisteredUser = {
     ...existing,
     ...safe,
-    // Campos inmutables desde el perfil
+    id:             existing.id,
     email:          existing.email,
     cedula:         existing.cedula,
     trayecto:       existing.trayecto,
@@ -1268,10 +1237,6 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
   return { success: true, user: updated };
 }
 
-/**
- * Actualización administrativa: permite cambiar los campos académicos.
- * Reservado al SuperAdministrador.
- */
 export function adminUpdateUser(
   email: string,
   updates: Partial<RegisteredUser>,
@@ -1288,7 +1253,6 @@ export function adminUpdateUser(
     }
   }
 
-  // Al mover de Trayecto se libera el titular si ya no corresponde
   let teacherEmail = updates.teacherEmail ?? existing.teacherEmail;
   if (updates.trayecto && updates.trayecto !== existing.trayecto) {
     const current = teacherEmail ? db[teacherEmail] : null;
@@ -1306,9 +1270,6 @@ export function adminUpdateUser(
   return { success: true, user: db[key] };
 }
 
-/**
- * Cambiar contraseña de un usuario verificando contraseña actual
- */
 export function updateUserPassword(email: string, actualPwd: string, nuevaPwd: string): AuthResult {
   const db = getUsersDb();
   const emailLower = email.trim().toLowerCase();
