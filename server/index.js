@@ -158,11 +158,25 @@ app.post("/api/auth/register", async (req, res) => {
       mascot_gender = "neutro",
     } = req.body;
 
-    const existing = await pool.query("SELECT * FROM users WHERE email = $1", [
-      email,
-    ]);
+    const emailNormalized = String(email || "").trim().toLowerCase();
+    const cedulaNormalized = String(cedula || "").trim();
+
+    const existing = await pool.query(
+      "SELECT id FROM users WHERE LOWER(email) = $1",
+      [emailNormalized]
+    );
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: "El correo ya está registrado" });
+    }
+
+    if (cedulaNormalized) {
+      const existingCedula = await pool.query(
+        "SELECT id FROM users WHERE cedula = $1 LIMIT 1",
+        [cedulaNormalized]
+      );
+      if (existingCedula.rows.length > 0) {
+        return res.status(409).json({ error: "La cédula ya está registrada" });
+      }
     }
 
     const approvalStatus = role === "profesor" ? "pending" : "approved";
@@ -173,8 +187,8 @@ app.post("/api/auth/register", async (req, res) => {
        RETURNING *`,
       [
         full_name,
-        email,
-        cedula,
+        emailNormalized,
+        cedulaNormalized,
         role,
         trayecto,
         section_id,
@@ -200,15 +214,51 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email } = req.body;
+    const emailNormalized = String(req.body.email || "").trim().toLowerCase();
     const result = await pool.query(
-      `UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE email = $1 RETURNING *`,
-      [email]
+      `UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE LOWER(email) = $1 RETURNING *`,
+      [emailNormalized]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
     res.json({ user: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch("/api/users/:email/approval", async (req, res) => {
+  try {
+    const email = req.params.email.trim().toLowerCase();
+    const { approval_status } = req.body;
+    if (!["approved", "rejected", "pending"].includes(approval_status)) {
+      return res.status(400).json({ error: "Estado de aprobación inválido" });
+    }
+    const result = await pool.query(
+      `UPDATE users SET approval_status = $1 WHERE LOWER(email) = $2 RETURNING *`,
+      [approval_status, email]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+    res.json({ user: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/users/:email", async (req, res) => {
+  try {
+    const email = req.params.email.trim().toLowerCase();
+    const result = await pool.query(
+      `DELETE FROM users WHERE LOWER(email) = $1 RETURNING id, email`,
+      [email]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+    res.json({ deleted: true, user: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
