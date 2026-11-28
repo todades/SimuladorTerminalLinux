@@ -58,6 +58,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [showPwd, setShowPwd] = useState(false);
   const [bootPhase, setBootPhase] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
 
   // Secciones desde la API / Neon
   const [sections, setSections] = useState<ApiSection[]>([]);
@@ -160,8 +161,9 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
   }, [form, password, availableSections, availableTeachers, isTeacherReq]);
 
   // ─── LOGIN SUBMIT ───
-  const submitLogin = (ev: React.FormEvent) => {
+  const submitLogin = async (ev: React.FormEvent) => {
     ev.preventDefault();
+    if (submitting) return;
     setLoginErr('');
     if (!loginEmail.trim() || !loginPwd) {
       setLoginErr('Por favor ingresa tu correo electrónico y contraseña.');
@@ -169,47 +171,64 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
       return;
     }
 
-    const res = loginUser(loginEmail, loginPwd);
-    if (!res.success) {
-      setLoginErr(res.error || 'Correo o contraseña incorrectos.');
-      playSound('error');
-      return;
-    }
+    setSubmitting(true);
+    try {
+      const res = await loginUser(loginEmail, loginPwd);
+      if (!res.success || !res.user) {
+        setLoginErr(res.error || 'Correo o contraseña incorrectos.');
+        playSound('error');
+        return;
+      }
 
-    playSound('boot');
-    onAuthSuccess(res.user!);
+      playSound('boot');
+      onAuthSuccess(res.user);
+    } catch (err) {
+      setLoginErr(err instanceof Error ? err.message : 'Error al iniciar sesión.');
+      playSound('error');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   // ─── REGISTER SUBMIT ───
-  const submitRegister = (ev: React.FormEvent) => {
+  const submitRegister = async (ev: React.FormEvent) => {
     ev.preventDefault();
+    if (submitting) return;
     setRegGeneralErr('');
     if (!validate()) {
       playSound('error');
       return;
     }
 
-    const res = registerUser({
-      ...form,
-      sectionId: form.sectionId,
-      password,
-      requestedRole: reqRole,
-    } as Parameters<typeof registerUser>[0] & { sectionId?: number | null });
+    setSubmitting(true);
+    try {
+      const res = await registerUser({
+        ...form,
+        sectionId: form.sectionId,
+        password,
+        requestedRole: reqRole,
+      });
 
-    if (!res.success) {
-      setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
+      if (!res.success || !res.user) {
+        setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
+        playSound('error');
+        return;
+      }
+
+      if (reqRole === 'profesor') {
+        playSound('success');
+        setPendingNotice(form.email);
+        return;
+      }
+
+      playSound('boot');
+      onAuthSuccess(res.user);
+    } catch (err) {
+      setRegGeneralErr(err instanceof Error ? err.message : 'No se pudo crear la cuenta.');
       playSound('error');
-      return;
+    } finally {
+      setSubmitting(false);
     }
-
-    if (reqRole === 'profesor') {
-      playSound('success');
-      setPendingNotice(form.email);
-      return;
-    }
-
-    playSound('boot');
-    onAuthSuccess(res.user!);
   };
 
   const set = (k: keyof RegisterPayload, v: string | number | null) => {
@@ -312,8 +331,12 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             )}
 
-            <button type="submit" className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg">
-              Entrar al Laboratorio
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg disabled:opacity-60"
+            >
+              {submitting ? 'Ingresando...' : 'Entrar al Laboratorio'}
             </button>
 
             <div className="mt-5 bg-[#0e111a] border border-[#1f2430] rounded-2xl p-4">
@@ -440,7 +463,8 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               <div className="bg-[#fbbf24]/10 border border-[#fbbf24]/30 rounded-xl px-3 py-2.5">
                 <p className="text-[10px] text-[#fbbf24] font-body leading-snug">
                   ⏳ Las cuentas docentes requieren <strong>autorización del
-                  administrador</strong>. Tu solicitud quedará pendiente hasta ser aprobada.
+                  administrador</strong>. Selecciona tu trayecto y sección de preferencia;
+                  tu solicitud quedará pendiente hasta ser aprobada.
                 </p>
               </div>
             )}
@@ -542,40 +566,40 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             </div>
 
-            {/* Trayecto y Sección */}
-            <div className={`grid gap-3 ${isTeacherReq ? 'grid-cols-1' : 'grid-cols-2'}`}>
-              {!isTeacherReq && (
-                <div>
-                  <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">Trayecto</label>
-                  <select
-                    value={form.trayecto}
-                    onChange={(e) => {
-                      const t = e.target.value;
-                      const firstTeacher = getTeachersByTrayecto(t)[0]?.email ?? '';
-                      const firstSec = sections.find((s) => s.trayecto === t)?.id ?? null;
-                      setForm((p) => ({
-                        ...p,
-                        trayecto: t,
-                        teacherEmail: firstTeacher,
-                        sectionId: firstSec,
-                      }));
-                      setErrs((p) => {
-                        const n = { ...p };
-                        delete n.teacherEmail;
-                        delete n.sectionId;
-                        return n;
-                      });
-                    }}
-                    className={`${baseInput} border-[#1f2430] focus:border-[#7c3aed]`}
-                  >
-                    {TRAYECTOS.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </div>
-              )}
+            {/* Trayecto y Sección (disponibles para Estudiante y Docente) */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">
+                  {isTeacherReq ? 'Trayecto (preferencia)' : 'Trayecto'}
+                </label>
+                <select
+                  value={form.trayecto}
+                  onChange={(e) => {
+                    const t = e.target.value;
+                    const firstTeacher = getTeachersByTrayecto(t)[0]?.email ?? '';
+                    const firstSec = sections.find((s) => s.trayecto === t)?.id ?? null;
+                    setForm((p) => ({
+                      ...p,
+                      trayecto: t,
+                      teacherEmail: firstTeacher,
+                      sectionId: firstSec,
+                    }));
+                    setErrs((p) => {
+                      const n = { ...p };
+                      delete n.teacherEmail;
+                      delete n.sectionId;
+                      return n;
+                    });
+                  }}
+                  className={`${baseInput} border-[#1f2430] focus:border-[#7c3aed]`}
+                >
+                  {TRAYECTOS.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
 
               <div>
                 <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">
-                  Sección {isTeacherReq ? '(preferencia)' : ''}
+                  {isTeacherReq ? 'Sección (preferencia)' : 'Sección'}
                 </label>
                 {loadingSections ? (
                   <div className={`${baseInput} border-[#1f2430] text-[#64748b]`}>
@@ -717,8 +741,16 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               <Mascot species={form.mascotSpecies} gender={form.mascotGender} animation="float" size={100} showName />
             </div>
 
-            <button type="submit" className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg">
-              {isTeacherReq ? '📨 Enviar Solicitud de Docente' : 'Crear Cuenta y Entrar'}
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg disabled:opacity-60"
+            >
+              {submitting
+                ? 'Procesando...'
+                : isTeacherReq
+                  ? '📨 Enviar Solicitud de Docente'
+                  : 'Crear Cuenta y Entrar'}
             </button>
           </form>
         )}
