@@ -1,6 +1,6 @@
 // ============================================================
 // 🔐 ACCESO — Iniciar Sesión / Crear Cuenta
-// Validación estricta con base de datos real de usuarios registrados
+// Validación estricta con base de datos real + sincronización Neon
 // ============================================================
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
@@ -11,6 +11,7 @@ import {
   getTeachersByTrayecto, TRAYECTOS,
   isValidPhone, getPhoneOperator, PHONE_PREFIXES, PHONE_HINT,
 } from '../engine/authEngine';
+import { api, ApiSection } from '../services/api';
 
 export interface RegisterPayload {
   nombre: string;
@@ -18,6 +19,7 @@ export interface RegisterPayload {
   email: string;
   cedula: string;
   trayecto: string;
+  sectionId: number | null;
   genero: string;
   telefono: string;
   mascotSpecies: MascotSpecies;
@@ -33,7 +35,7 @@ type RequestedRole = 'estudiante' | 'profesor';
 
 const EMPTY: RegisterPayload = {
   nombre: '', apellido: '', email: '', cedula: '',
-  trayecto: 'Trayecto I', genero: 'masculino', telefono: '',
+  trayecto: 'Trayecto I', sectionId: null, genero: 'masculino', telefono: '',
   mascotSpecies: 'pinguino', mascotGender: 'masculino',
   teacherEmail: '',
 };
@@ -56,7 +58,10 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [showPwd, setShowPwd] = useState(false);
   const [bootPhase, setBootPhase] = useState(0);
-  const [submittingReg, setSubmittingReg] = useState(false);
+
+  // Secciones desde la API / Neon
+  const [sections, setSections] = useState<ApiSection[]>([]);
+  const [loadingSections, setLoadingSections] = useState(false);
 
   // Login
   const [loginEmail, setLoginEmail] = useState('');
@@ -78,6 +83,44 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     return () => clearInterval(i);
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    setLoadingSections(true);
+    api.getSections()
+      .then((rows) => {
+        if (active) setSections(rows || []);
+      })
+      .catch(() => {
+        if (active) setSections([]);
+      })
+      .finally(() => {
+        if (active) setLoadingSections(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const availableSections = useMemo(
+    () => sections.filter((s) => !form.trayecto || s.trayecto === form.trayecto),
+    [sections, form.trayecto],
+  );
+
+  // Preseleccionar la primera sección disponible si aún no hay una válida para el trayecto
+  useEffect(() => {
+    if (availableSections.length === 0) {
+      if (form.sectionId !== null) {
+        setForm((p) => ({ ...p, sectionId: null }));
+      }
+      return;
+    }
+    const stillValid = availableSections.some((s) => s.id === form.sectionId);
+    if (!stillValid) {
+      setForm((p) => ({ ...p, sectionId: availableSections[0].id }));
+    }
+  }, [availableSections, form.sectionId]);
+
+  // ─── Validadores ────────────────────────────────────
   const vEmail  = (v: string) => /^[a-zA-Z0-9._%+\-]+@gmail\.com$/.test(v.trim());
   const vCedula = (v: string) => /^\d{8}$/.test(v);
   const vTel    = (v: string) => isValidPhone(v);
@@ -86,6 +129,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     v.length >= 12 && /[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v) &&
     /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(v);
 
+  // Docentes disponibles para el Trayecto seleccionado
   const availableTeachers = useMemo(
     () => getTeachersByTrayecto(form.trayecto),
     [form.trayecto],
@@ -105,13 +149,17 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     if (!vCedula(form.cedula))  e.cedula   = 'La cédula debe tener exactamente 8 dígitos.';
     if (!vTel(form.telefono))   e.telefono = PHONE_HINT;
     if (!vPass(password))       e.password = 'Mín 12 caracteres: mayúscula, minúscula, número y símbolo.';
+    if (!isTeacherReq && availableSections.length > 0 && !form.sectionId) {
+      e.sectionId = 'Debes seleccionar una sección.';
+    }
     if (!isTeacherReq && availableTeachers.length > 0 && !form.teacherEmail) {
       e.teacherEmail = 'Debes seleccionar tu docente titular.';
     }
     setErrs(e);
     return Object.keys(e).length === 0;
-  }, [form, password, availableTeachers, isTeacherReq]);
+  }, [form, password, availableSections, availableTeachers, isTeacherReq]);
 
+  // ─── LOGIN SUBMIT ───
   const submitLogin = (ev: React.FormEvent) => {
     ev.preventDefault();
     setLoginErr('');
@@ -132,56 +180,46 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     onAuthSuccess(res.user!);
   };
 
-  const submitRegister = async (ev: React.FormEvent) => {
+  // ─── REGISTER SUBMIT ───
+  const submitRegister = (ev: React.FormEvent) => {
     ev.preventDefault();
-    if (submittingReg) return;
-
     setRegGeneralErr('');
     if (!validate()) {
       playSound('error');
       return;
     }
 
-    setSubmittingReg(true);
-    try {
-      const res = await registerUser({
-        ...form,
-        password,
-        requestedRole: reqRole,
-      });
+    const res = registerUser({
+      ...form,
+      sectionId: form.sectionId,
+      password,
+      requestedRole: reqRole,
+    } as Parameters<typeof registerUser>[0] & { sectionId?: number | null });
 
-      if (!res.success || !res.user) {
-        setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
-        playSound('error');
-        return;
-      }
-
-      if (reqRole === 'profesor') {
-        playSound('success');
-        setPendingNotice(form.email);
-        return;
-      }
-
-      playSound('boot');
-      onAuthSuccess(res.user);
-    } catch (err) {
-      setRegGeneralErr(
-        err instanceof Error ? err.message : 'No se pudo crear la cuenta.',
-      );
+    if (!res.success) {
+      setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
       playSound('error');
-    } finally {
-      setSubmittingReg(false);
+      return;
     }
+
+    if (reqRole === 'profesor') {
+      playSound('success');
+      setPendingNotice(form.email);
+      return;
+    }
+
+    playSound('boot');
+    onAuthSuccess(res.user!);
   };
 
-  const set = (k: keyof RegisterPayload, v: string) => {
+  const set = (k: keyof RegisterPayload, v: string | number | null) => {
     setForm((p) => ({ ...p, [k]: v }));
-    setErrs((p) => { const n = { ...p }; delete n[k]; return n; });
+    setErrs((p) => { const n = { ...p }; delete n[k as string]; return n; });
     setRegGeneralErr('');
   };
 
   const okOf = (k: keyof RegisterPayload | 'password'): boolean | null => {
-    const val = k === 'password' ? password : (form[k] as string);
+    const val = k === 'password' ? password : (form[k] as unknown as string);
     if (!val) return null;
     switch (k) {
       case 'nombre': case 'apellido': return vName(val);
@@ -324,7 +362,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
           </form>
         )}
 
-        {/* ── REGISTRO ── */}
+        {/* ── REGISTRO: AVISO PENDIENTE DOCENTE ── */}
         {tab === 'register' && pendingNotice && (
           <div className="fade-up space-y-4">
             <div className="bg-[#fbbf24]/10 border-2 border-[#fbbf24]/40 rounded-2xl p-6 text-center">
@@ -338,7 +376,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                 <strong className="text-[#fbbf24]">pendiente de autorización</strong>.
               </p>
               <p className="text-xs text-[#64748b] font-body mt-3 leading-relaxed">
-                El SuperAdministrador revisará tu solicitud y te asignará un Trayecto.
+                El SuperAdministrador revisará tu solicitud y te asignará una sección/trayecto.
                 Podrás iniciar sesión en cuanto sea aprobada.
               </p>
             </div>
@@ -359,6 +397,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
           </div>
         )}
 
+        {/* ── REGISTRO ── */}
         {tab === 'register' && !pendingNotice && (
           <form onSubmit={submitRegister} className="space-y-3 fade-up">
             <div>
@@ -401,8 +440,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               <div className="bg-[#fbbf24]/10 border border-[#fbbf24]/30 rounded-xl px-3 py-2.5">
                 <p className="text-[10px] text-[#fbbf24] font-body leading-snug">
                   ⏳ Las cuentas docentes requieren <strong>autorización del
-                  administrador</strong>. No necesitas elegir Trayecto: se te asignará
-                  una sección al aprobar tu solicitud.
+                  administrador</strong>. Tu solicitud quedará pendiente hasta ser aprobada.
                 </p>
               </div>
             )}
@@ -504,6 +542,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             </div>
 
+            {/* Trayecto y Sección */}
             <div className={`grid gap-3 ${isTeacherReq ? 'grid-cols-1' : 'grid-cols-2'}`}>
               {!isTeacherReq && (
                 <div>
@@ -512,9 +551,20 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                     value={form.trayecto}
                     onChange={(e) => {
                       const t = e.target.value;
-                      const first = getTeachersByTrayecto(t)[0]?.email ?? '';
-                      setForm((p) => ({ ...p, trayecto: t, teacherEmail: first }));
-                      setErrs((p) => { const n = { ...p }; delete n.teacherEmail; return n; });
+                      const firstTeacher = getTeachersByTrayecto(t)[0]?.email ?? '';
+                      const firstSec = sections.find((s) => s.trayecto === t)?.id ?? null;
+                      setForm((p) => ({
+                        ...p,
+                        trayecto: t,
+                        teacherEmail: firstTeacher,
+                        sectionId: firstSec,
+                      }));
+                      setErrs((p) => {
+                        const n = { ...p };
+                        delete n.teacherEmail;
+                        delete n.sectionId;
+                        return n;
+                      });
                     }}
                     className={`${baseInput} border-[#1f2430] focus:border-[#7c3aed]`}
                   >
@@ -522,6 +572,42 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                   </select>
                 </div>
               )}
+
+              <div>
+                <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">
+                  Sección {isTeacherReq ? '(preferencia)' : ''}
+                </label>
+                {loadingSections ? (
+                  <div className={`${baseInput} border-[#1f2430] text-[#64748b]`}>
+                    Cargando secciones...
+                  </div>
+                ) : availableSections.length === 0 ? (
+                  <div className={`${baseInput} border-[#1f2430] text-[#64748b]`}>
+                    Sin secciones cargadas en BD
+                  </div>
+                ) : (
+                  <select
+                    value={form.sectionId ?? ''}
+                    onChange={(e) =>
+                      set('sectionId', e.target.value ? Number(e.target.value) : null)
+                    }
+                    className={`${baseInput} ${errs.sectionId ? 'border-[#f87171]' : 'border-[#1f2430] focus:border-[#7c3aed]'}`}
+                  >
+                    {availableSections.map((sec) => (
+                      <option key={sec.id} value={sec.id}>
+                        {sec.name} ({sec.trayecto})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {errs.sectionId && (
+                  <p className="text-[10px] text-[#f87171] mt-1 font-body">{errs.sectionId}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Género y Docente titular */}
+            <div className={`grid gap-3 ${isTeacherReq ? 'grid-cols-1' : 'grid-cols-2'}`}>
               <div>
                 <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">Género</label>
                 <div className="flex gap-2">
@@ -536,39 +622,38 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                   ))}
                 </div>
               </div>
-            </div>
 
-            {!isTeacherReq && (
-              <div>
-                <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">
-                  Docente titular de {form.trayecto}
-                </label>
-                {availableTeachers.length === 0 ? (
-                  <div className="bg-[#fbbf24]/10 border border-[#fbbf24]/30 rounded-xl px-3 py-2.5">
-                    <p className="text-[10px] text-[#fbbf24] font-body">
-                      ⚠️ Aún no hay docentes asignados a {form.trayecto}. Podrás continuar y
-                      el administrador te asignará uno más tarde.
-                    </p>
-                  </div>
-                ) : (
-                  <select
-                    value={form.teacherEmail}
-                    onChange={(e) => set('teacherEmail', e.target.value)}
-                    className={`${baseInput} ${errs.teacherEmail ? 'border-[#f87171]' : 'border-[#1f2430] focus:border-[#7c3aed]'}`}
-                  >
-                    <option value="">— Selecciona tu docente —</option>
-                    {availableTeachers.map((t) => (
-                      <option key={t.email} value={t.email}>
-                        {t.nombre} {t.apellido} · {t.trayecto}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                {errs.teacherEmail && (
-                  <p className="text-[10px] text-[#f87171] mt-1 font-body">{errs.teacherEmail}</p>
-                )}
-              </div>
-            )}
+              {!isTeacherReq && (
+                <div>
+                  <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">
+                    Docente titular
+                  </label>
+                  {availableTeachers.length === 0 ? (
+                    <div className="bg-[#fbbf24]/10 border border-[#fbbf24]/30 rounded-xl px-3 py-2.5">
+                      <p className="text-[10px] text-[#fbbf24] font-body">
+                        ⚠️ Sin docente asignado en {form.trayecto}.
+                      </p>
+                    </div>
+                  ) : (
+                    <select
+                      value={form.teacherEmail}
+                      onChange={(e) => set('teacherEmail', e.target.value)}
+                      className={`${baseInput} ${errs.teacherEmail ? 'border-[#f87171]' : 'border-[#1f2430] focus:border-[#7c3aed]'}`}
+                    >
+                      <option value="">— Selecciona tu docente —</option>
+                      {availableTeachers.map((t) => (
+                        <option key={t.email} value={t.email}>
+                          {t.nombre} {t.apellido}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {errs.teacherEmail && (
+                    <p className="text-[10px] text-[#f87171] mt-1 font-body">{errs.teacherEmail}</p>
+                  )}
+                </div>
+              )}
+            </div>
 
             <div>
               <label className="block text-[11px] text-[#94a3b8] mb-1 font-body">Contraseña</label>
@@ -593,6 +678,7 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               {errs.password && <p className="text-[10px] text-[#f87171] mt-1 font-body">{errs.password}</p>}
             </div>
 
+            {/* Mascota */}
             <div>
               <label className="block text-[11px] text-[#94a3b8] mb-1.5 font-body">Elige tu Mascota Guía</label>
               <div className="grid grid-cols-4 gap-2">
@@ -626,20 +712,13 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
               </div>
             </div>
 
+            {/* Vista previa */}
             <div className="bg-[#13161f] rounded-2xl p-4 border border-[#1f2430] flex justify-center">
               <Mascot species={form.mascotSpecies} gender={form.mascotGender} animation="float" size={100} showName />
             </div>
 
-            <button
-              type="submit"
-              disabled={submittingReg}
-              className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg disabled:opacity-60"
-            >
-              {submittingReg
-                ? 'Creando cuenta...'
-                : isTeacherReq
-                  ? '📨 Enviar Solicitud de Docente'
-                  : 'Crear Cuenta y Entrar'}
+            <button type="submit" className="w-full btn-mission py-3 rounded-xl text-white font-semibold font-ui text-sm smooth-transition shadow-lg">
+              {isTeacherReq ? '📨 Enviar Solicitud de Docente' : 'Crear Cuenta y Entrar'}
             </button>
           </form>
         )}
