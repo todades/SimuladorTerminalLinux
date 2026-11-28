@@ -42,7 +42,7 @@ async function initDatabase() {
       role VARCHAR(30) DEFAULT 'estudiante',
       trayecto VARCHAR(50),
       section_id INTEGER REFERENCES sections(id) ON DELETE SET NULL,
-      approval_status VARCHAR(30) DEFAULT 'pendiente',
+      approval_status VARCHAR(30) DEFAULT 'approved',
       mascot_name VARCHAR(40) DEFAULT 'Tux',
       mascot_gender VARCHAR(20) DEFAULT 'neutro',
       last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -58,7 +58,25 @@ async function initDatabase() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
-  console.log("Tablas verificadas en Neon PostgreSQL.");
+
+  const { rows: secCount } = await pool.query(
+    "SELECT COUNT(*)::int AS total FROM sections"
+  );
+  if (secCount[0].total === 0) {
+    await pool.query(`
+      INSERT INTO sections (name, trayecto, period, is_active) VALUES
+        ('Sección 1', 'Trayecto I', '2026-II', TRUE),
+        ('Sección 2', 'Trayecto I', '2026-II', TRUE),
+        ('Sección 1', 'Trayecto II', '2026-II', TRUE),
+        ('Sección 2', 'Trayecto II', '2026-II', TRUE),
+        ('Sección 1', 'Trayecto III', '2026-II', TRUE),
+        ('Sección 2', 'Trayecto III', '2026-II', TRUE),
+        ('Sección 1', 'Trayecto IV', '2026-II', TRUE),
+        ('Sección 2', 'Trayecto IV', '2026-II', TRUE);
+    `);
+  }
+
+  console.log("Tablas y secciones verificadas en Neon PostgreSQL.");
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -67,6 +85,36 @@ app.get("/api/health", async (_req, res) => {
     res.json({ status: "ok", database: "connected" });
   } catch (err) {
     res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+app.get("/api/sections", async (_req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM sections WHERE is_active = TRUE ORDER BY trayecto ASC, name ASC"
+    );
+    res.json({ sections: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/sections", async (req, res) => {
+  try {
+    const { name, trayecto, period = "2026-II", teacher_id = null } = req.body;
+    if (!name || !trayecto) {
+      return res
+        .status(400)
+        .json({ error: "Los campos name y trayecto son obligatorios" });
+    }
+    const result = await pool.query(
+      `INSERT INTO sections (name, trayecto, period, teacher_id, is_active)
+       VALUES ($1, $2, $3, $4, TRUE) RETURNING *`,
+      [name.trim(), trayecto.trim(), period, teacher_id]
+    );
+    res.status(201).json({ section: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -90,7 +138,7 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(409).json({ error: "El correo ya está registrado" });
     }
 
-    const approvalStatus = role === "estudiante" ? "aprobado" : "pendiente";
+    const approvalStatus = role === "profesor" ? "pending" : "approved";
 
     const result = await pool.query(
       `INSERT INTO users (full_name, email, cedula, role, trayecto, section_id, approval_status, mascot_name, mascot_gender)
@@ -141,8 +189,12 @@ app.post("/api/auth/login", async (req, res) => {
 
 app.post("/api/progress", async (req, res) => {
   try {
-    const { user_id, completed_steps = [], progress_percent = 0, current_level = 1 } =
-      req.body;
+    const {
+      user_id,
+      completed_steps = [],
+      progress_percent = 0,
+      current_level = 1,
+    } = req.body;
 
     const result = await pool.query(
       `INSERT INTO user_progress (user_id, completed_steps, progress_percent, current_level, updated_at)
@@ -165,8 +217,9 @@ app.post("/api/progress", async (req, res) => {
 app.get("/api/users", async (_req, res) => {
   try {
     const result = await pool.query(`
-      SELECT u.*, p.progress_percent, p.current_level, p.completed_steps, p.updated_at
+      SELECT u.*, s.name AS section_name, p.progress_percent, p.current_level, p.completed_steps, p.updated_at
       FROM users u
+      LEFT JOIN sections s ON s.id = u.section_id
       LEFT JOIN user_progress p ON p.user_id = u.id
       ORDER BY u.id DESC
     `);
@@ -186,3 +239,6 @@ initDatabase()
     console.error("Error iniciando base de datos:", err);
     process.exit(1);
   });
+```[cite: 14]
+
+Al hacer `push` a `main`, Render desplegará automáticamente `simulador-terminal-api` y poblará la tabla `sections` en Neon al arrancar[cite: 12, 14]. ¿Quieres que te muestre también cómo cargar esas secciones en tu formulario de registro?
