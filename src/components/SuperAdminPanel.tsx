@@ -14,6 +14,7 @@ import {
   previewDeletion, toggleTeacherCascade, DeletionImpact, adminUpdateUser,
 } from '../engine/authEngine';
 import { createDefaultLevels, calculateProgress, MissionLevel } from '../engine/progressEngine';
+import { api, ApiSection } from '../services/api';
 import { playSound } from '../utils/soundSynth';
 
 interface SuperAdminPanelProps {
@@ -50,9 +51,10 @@ export default function SuperAdminPanel({
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const [reassign, setReassign] = useState<RegisteredUser | null>(null);
+  // Secciones para mostrar el nombre de sección elegida por el docente
+  const [sections, setSections] = useState<ApiSection[]>([]);
   // Flujo de autorización docente
   const [approveTarget, setApproveTarget] = useState<RegisteredUser | null>(null);
-  const [assignTrayecto, setAssignTrayecto] = useState<string>(TRAYECTOS[0]);
   const [rejectTarget, setRejectTarget] = useState<RegisteredUser | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   // Eliminación con previsualización de impacto
@@ -66,6 +68,27 @@ export default function SuperAdminPanel({
     playSound(type === 'ok' ? 'success' : 'error');
     setTimeout(() => setToast(null), 3400);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    api.getSections()
+      .then((rows) => {
+        if (active) setSections(rows || []);
+      })
+      .catch(() => {
+        if (active) setSections([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const getSectionLabel = useCallback((sectionId?: number | null): string => {
+    if (!sectionId) return 'No especificada';
+    const found = sections.find((s) => s.id === sectionId);
+    if (!found) return `Sección #${sectionId}`;
+    return found.trayecto ? `${found.name} (${found.trayecto})` : found.name;
+  }, [sections]);
 
   const metrics = useMemo(() => getGlobalMetrics(), [version]); // eslint-disable-line
   const matrix = useMemo(
@@ -83,11 +106,12 @@ export default function SuperAdminPanel({
   // ─── Autorización de docentes ──────────────────────
   const handleApprove = () => {
     if (!approveTarget) return;
-    const res = approveTeacher(approveTarget.email, assignTrayecto, currentEmail);
+    const chosenTrayecto = approveTarget.trayecto || TRAYECTOS[0];
+    const res = approveTeacher(approveTarget.email, chosenTrayecto, currentEmail);
     if (res.success) {
       refresh();
       setApproveTarget(null);
-      notify('ok', `✅ ${approveTarget.nombre} autorizado como docente de ${assignTrayecto}.`);
+      notify('ok', `✅ ${approveTarget.nombre} autorizado como docente (${chosenTrayecto}).`);
     } else notify('err', res.error || 'No se pudo aprobar.');
   };
 
@@ -332,8 +356,8 @@ export default function SuperAdminPanel({
                         <p className="text-sm font-bold text-white font-ui">
                           {t.nombre} {t.apellido}
                         </p>
-                        <span className="text-[9px] px-2 py-0.5 rounded-full bg-[#fbbf24]/20 text-[#fbbf24] font-ui">
-                          ⏳ Sin Trayecto asignado
+                        <span className="text-[9px] px-2 py-0.5 rounded-full bg-[#7c3aed]/20 text-[#a78bfa] font-ui">
+                          {t.trayecto || 'Sin Trayecto'} · {getSectionLabel(t.sectionId)}
                         </span>
                       </div>
                       <p className="text-[10px] text-[#64748b] font-body">
@@ -350,7 +374,6 @@ export default function SuperAdminPanel({
                       <button
                         onClick={() => {
                           setApproveTarget(t);
-                          setAssignTrayecto(TRAYECTOS[0]);
                           playSound('click');
                         }}
                         className="px-4 py-2 rounded-xl text-[11px] font-bold font-ui bg-[#22c55e]/20 border border-[#22c55e]/45 text-[#22c55e] hover:bg-[#22c55e]/30 smooth-transition"
@@ -801,7 +824,7 @@ export default function SuperAdminPanel({
         </div>
       )}
 
-      {/* ═══ MODAL: Autorizar docente y asignar Trayecto ═══ */}
+      {/* ═══ MODAL: Autorizar docente ═══ */}
       {approveTarget && (
         <div className="fixed inset-0 z-[95] flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm"
           onClick={() => setApproveTarget(null)}>
@@ -832,36 +855,17 @@ export default function SuperAdminPanel({
                 <p className="text-[10px] text-[#64748b] font-body">
                   <strong className="text-[#94a3b8]">Teléfono:</strong> {approveTarget.telefono}
                 </p>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-[#94a3b8] mb-2 font-body">
-                  Asigna el Trayecto que impartirá
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {TRAYECTOS.map((t) => {
-                    const meta = TRAYECTO_META[t];
-                    const sel = assignTrayecto === t;
-                    return (
-                      <button
-                        key={t}
-                        onClick={() => { setAssignTrayecto(t); playSound('click'); }}
-                        className={`py-2.5 rounded-xl text-xs font-semibold font-ui smooth-transition border ${
-                          sel ? 'text-white' : 'bg-[#0e111a] border-[#1f2430] text-[#94a3b8] hover:border-[#7c3aed]/40'
-                        }`}
-                        style={sel ? { background: `${meta.color}25`, borderColor: `${meta.color}70` } : {}}
-                      >
-                        {meta.icon} {t}
-                      </button>
-                    );
-                  })}
-                </div>
+                <p className="text-[10px] text-[#64748b] font-body">
+                  <strong className="text-[#94a3b8]">Trayecto seleccionado:</strong> {approveTarget.trayecto || 'No especificado'}
+                </p>
+                <p className="text-[10px] text-[#64748b] font-body">
+                  <strong className="text-[#94a3b8]">Sección seleccionada:</strong> {getSectionLabel(approveTarget.sectionId)}
+                </p>
               </div>
 
               <div className="bg-[#22c55e]/10 border border-[#22c55e]/30 rounded-xl px-3 py-2.5">
                 <p className="text-[10px] text-[#22c55e] font-body leading-snug">
-                  Al autorizar, la cuenta se activará y el docente podrá iniciar sesión
-                  con acceso total a los niveles de su sección.
+                  Al autorizar, la cuenta se activará con el trayecto y sección indicados y el docente podrá iniciar sesión.
                 </p>
               </div>
 
