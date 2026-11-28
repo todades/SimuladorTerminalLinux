@@ -1,3 +1,12 @@
+export interface ApiSection {
+  id: number;
+  name: string;
+  trayecto: string;
+  period: string;
+  teacher_id?: number | null;
+  is_active: boolean;
+}
+
 export interface ApiUser {
   id: number;
   full_name: string;
@@ -79,6 +88,11 @@ export const api = {
     return request('/health');
   },
 
+  async getSections(): Promise<ApiSection[]> {
+    const res = await request<{ sections: ApiSection[] }>('/sections');
+    return res.sections;
+  },
+
   async register(payload: RegisterPayload): Promise<ApiUser> {
     const res = await request<{ user: ApiUser }>('/auth/register', {
       method: 'POST',
@@ -108,3 +122,6 @@ export const api = {
     return res.users;
   },
 };
+```[cite: 15]
+
+¿Qué archivo de `src/components/` renderiza esa pantalla de registro? Pásamelo por aquí y te agrego el selector de secciones en su interfaz.
