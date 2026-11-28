@@ -8,7 +8,7 @@ import Mascot, { MascotSpecies, MascotGender, MASCOT_INFO } from './Mascot';
 import { playSound, initAudio } from '../utils/soundSynth';
 import {
   loginUser, registerUser, RegisteredUser, DEMO_CREDENTIALS, ROLE_META,
-  getTeachersByTrayecto, TRAYECTOS,
+  getTeachersByTrayecto, listAllUsers, TRAYECTOS,
   isValidPhone, getPhoneOperator, PHONE_PREFIXES, PHONE_HINT,
 } from '../engine/authEngine';
 import { api, ApiSection } from '../services/api';
@@ -102,10 +102,40 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
     };
   }, []);
 
-  const availableSections = useMemo(
-    () => sections.filter((s) => !form.trayecto || s.trayecto === form.trayecto),
-    [sections, form.trayecto],
-  );
+  const allUsers = useMemo(() => listAllUsers(), [tab, reqRole]);
+
+  const occupiedSectionIds = useMemo(() => {
+    const occupied = new Set<number>();
+
+    for (const sec of sections) {
+      const secWithTeacher = sec as ApiSection & { teacher_id?: number | null };
+      if (secWithTeacher.teacher_id != null) {
+        occupied.add(sec.id);
+      }
+    }
+
+    for (const u of allUsers) {
+      const userWithSection = u as RegisteredUser & { section_id?: number | null };
+      const assignedSecId = u.sectionId ?? userWithSection.section_id;
+      if (
+        u.role === 'profesor' &&
+        u.approvalStatus !== 'rejected' &&
+        assignedSecId != null
+      ) {
+        occupied.add(Number(assignedSecId));
+      }
+    }
+
+    return occupied;
+  }, [sections, allUsers]);
+
+  const availableSections = useMemo(() => {
+    const byTrayecto = sections.filter(
+      (s) => !form.trayecto || s.trayecto === form.trayecto,
+    );
+    if (!isTeacherReq) return byTrayecto;
+    return byTrayecto.filter((s) => !occupiedSectionIds.has(s.id));
+  }, [sections, form.trayecto, isTeacherReq, occupiedSectionIds]);
 
   // Preseleccionar la primera sección disponible si aún no hay una válida para el trayecto
   useEffect(() => {
@@ -606,8 +636,10 @@ export default function AuthPage({ onAuthSuccess }: AuthPageProps) {
                     Cargando secciones...
                   </div>
                 ) : availableSections.length === 0 ? (
-                  <div className={`${baseInput} border-[#1f2430] text-[#64748b]`}>
-                    Sin secciones cargadas en BD
+                  <div className={`${baseInput} border-[#1f2430] text-[#fbbf24]`}>
+                    {isTeacherReq
+                      ? 'Sin secciones libres en este trayecto'
+                      : 'Sin secciones cargadas en BD'}
                   </div>
                 ) : (
                   <select
