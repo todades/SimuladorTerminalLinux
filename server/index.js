@@ -108,18 +108,25 @@ app.get("/api/sections", async (req, res) => {
   try {
     const trayecto =
       typeof req.query.trayecto === "string" ? req.query.trayecto.trim() : "";
+    const freeOnly = req.query.freeOnly === "true";
+
+    const conditions = ["is_active = TRUE"];
+    const params = [];
 
     if (trayecto) {
-      const result = await pool.query(
-        "SELECT * FROM sections WHERE is_active = TRUE AND trayecto = $1 ORDER BY name ASC, id ASC",
-        [trayecto]
-      );
-      return res.json({ sections: result.rows });
+      params.push(trayecto);
+      conditions.push(`trayecto = $${params.length}`);
+    }
+
+    if (freeOnly) {
+      conditions.push("teacher_id IS NULL");
     }
 
     const result = await pool.query(
-      "SELECT * FROM sections WHERE is_active = TRUE ORDER BY trayecto ASC, name ASC, id ASC"
+      `SELECT * FROM sections WHERE ${conditions.join(" AND ")} ORDER BY trayecto ASC, name ASC, id ASC`,
+      params
     );
+
     res.json({ sections: result.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -231,18 +238,47 @@ app.post("/api/auth/login", async (req, res) => {
 app.patch("/api/users/:email/approval", async (req, res) => {
   try {
     const email = req.params.email.trim().toLowerCase();
-    const { approval_status } = req.body;
+    const { approval_status, trayecto, section_id } = req.body;
     if (!["approved", "rejected", "pending"].includes(approval_status)) {
       return res.status(400).json({ error: "Estado de aprobación inválido" });
     }
-    const result = await pool.query(
-      `UPDATE users SET approval_status = $1 WHERE LOWER(email) = $2 RETURNING *`,
-      [approval_status, email]
+
+    const currentRes = await pool.query(
+      `SELECT * FROM users WHERE LOWER(email) = $1`,
+      [email]
     );
-    if (result.rows.length === 0) {
+    if (currentRes.rows.length === 0) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
-    res.json({ user: result.rows[0] });
+
+    const currentUser = currentRes.rows[0];
+    const nextTrayecto = trayecto ?? currentUser.trayecto;
+    const nextSectionId = section_id !== undefined ? section_id : currentUser.section_id;
+
+    const result = await pool.query(
+      `UPDATE users
+       SET approval_status = $1, trayecto = $2, section_id = $3
+       WHERE LOWER(email) = $4
+       RETURNING *`,
+      [approval_status, nextTrayecto, nextSectionId, email]
+    );
+    const updatedUser = result.rows[0];
+
+    if (updatedUser.role === "profesor") {
+      if (approval_status === "approved" && updatedUser.section_id) {
+        await pool.query(
+          `UPDATE sections SET teacher_id = $1 WHERE id = $2`,
+          [updatedUser.id, updatedUser.section_id]
+        );
+      } else if (approval_status === "rejected") {
+        await pool.query(
+          `UPDATE sections SET teacher_id = NULL WHERE teacher_id = $1`,
+          [updatedUser.id]
+        );
+      }
+    }
+
+    res.json({ user: updatedUser });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -251,13 +287,24 @@ app.patch("/api/users/:email/approval", async (req, res) => {
 app.delete("/api/users/:email", async (req, res) => {
   try {
     const email = req.params.email.trim().toLowerCase();
-    const result = await pool.query(
-      `DELETE FROM users WHERE LOWER(email) = $1 RETURNING id, email`,
+    const existingRes = await pool.query(
+      `SELECT id, email FROM users WHERE LOWER(email) = $1`,
       [email]
     );
-    if (result.rows.length === 0) {
+    if (existingRes.rows.length === 0) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
+
+    const targetUser = existingRes.rows[0];
+    await pool.query(
+      `UPDATE sections SET teacher_id = NULL WHERE teacher_id = $1`,
+      [targetUser.id]
+    );
+
+    const result = await pool.query(
+      `DELETE FROM users WHERE id = $1 RETURNING id, email`,
+      [targetUser.id]
+    );
     res.json({ deleted: true, user: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
