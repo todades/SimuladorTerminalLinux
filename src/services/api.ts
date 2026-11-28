@@ -122,6 +122,3 @@ export const api = {
     return res.users;
   },
 };
-```[cite: 15]
-
-¿Qué archivo de `src/components/` renderiza esa pantalla de registro? Pásamelo por aquí y te agrego el selector de secciones en su interfaz.
