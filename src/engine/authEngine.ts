@@ -4,7 +4,7 @@
 // ============================================================
 
 import { MascotSpecies, MascotGender } from '../components/Mascot';
-import { api } from '../services/api';
+import { api, ApiUser } from '../services/api';
 
 // ─── RBAC: 3 niveles de acceso ────────────────────────
 export type UserRole = 'estudiante' | 'profesor' | 'administrador';
@@ -961,23 +961,73 @@ export interface AuthResult {
   user?: RegisteredUser;
 }
 
-function splitFullName(fullName: string): { nombre: string; apellido: string } {
-  const parts = fullName.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return { nombre: 'Usuario', apellido: 'UPTA' };
-  if (parts.length === 1) return { nombre: parts[0], apellido: '' };
-  return { nombre: parts[0], apellido: parts.slice(1).join(' ') };
+function mapApiRoleToEngineRole(role?: string): UserRole {
+  if (role === 'administrador' || role === 'superadmin') return 'administrador';
+  if (role === 'profesor') return 'profesor';
+  return 'estudiante';
 }
 
-function normalizeMascotSpecies(raw?: string): MascotSpecies {
-  const val = (raw || '').toLowerCase();
-  if (val === 'zorro' || val === 'vulpix') return 'zorro';
-  if (val === 'buho' || val === 'athena') return 'buho';
-  if (val === 'dragon' || val === 'ignis') return 'dragon';
-  return 'pinguino';
-}
+function mergeApiUserWithLocal(
+  apiUser: ApiUser,
+  fallback: Partial<RegisteredUser>,
+): RegisteredUser {
+  const emailLower = (apiUser.email || fallback.email || '').trim().toLowerCase();
+  const existing = findUserByEmail(emailLower);
+  const fullNameParts = (apiUser.full_name || '').trim().split(/\s+/).filter(Boolean);
+  const nombre =
+    fallback.nombre?.trim() ||
+    existing?.nombre ||
+    fullNameParts[0] ||
+    'Usuario';
+  const apellido =
+    fallback.apellido?.trim() ||
+    existing?.apellido ||
+    fullNameParts.slice(1).join(' ') ||
+    '';
 
-function normalizeMascotGender(raw?: string): MascotGender {
-  return raw === 'femenino' ? 'femenino' : 'masculino';
+  const role = mapApiRoleToEngineRole(apiUser.role || fallback.role || existing?.role);
+  const approvalStatus: ApprovalStatus =
+    apiUser.approval_status === 'pendiente' || apiUser.approval_status === 'pending'
+      ? 'pending'
+      : apiUser.approval_status === 'rechazado' || apiUser.approval_status === 'rejected'
+        ? 'rejected'
+        : (existing?.approvalStatus ?? 'approved');
+
+  const mascotSpecies: MascotSpecies =
+    (apiUser.mascot_name as MascotSpecies) ||
+    fallback.mascotSpecies ||
+    existing?.mascotSpecies ||
+    'pinguino';
+
+  const mascotGender: MascotGender =
+    (apiUser.mascot_gender as MascotGender) ||
+    fallback.mascotGender ||
+    existing?.mascotGender ||
+    'masculino';
+
+  return {
+    id: apiUser.id ?? existing?.id,
+    nombre,
+    apellido,
+    email: emailLower,
+    cedula: (apiUser.cedula ?? fallback.cedula ?? existing?.cedula ?? '').trim(),
+    trayecto: apiUser.trayecto ?? fallback.trayecto ?? existing?.trayecto ?? 'Trayecto I',
+    sectionId: apiUser.section_id ?? fallback.sectionId ?? existing?.sectionId ?? null,
+    genero: fallback.genero || existing?.genero || 'masculino',
+    telefono: fallback.telefono?.trim() || existing?.telefono || '',
+    passwordHash: fallback.passwordHash || existing?.passwordHash || '',
+    mascotSpecies,
+    mascotGender,
+    registeredAt: apiUser.created_at || existing?.registeredAt || new Date().toISOString(),
+    role,
+    active: existing?.active ?? (approvalStatus === 'approved'),
+    lastLogin: apiUser.last_seen || new Date().toISOString(),
+    approvalStatus,
+    reviewedBy: existing?.reviewedBy ?? null,
+    reviewedAt: existing?.reviewedAt ?? null,
+    rejectionReason: existing?.rejectionReason ?? null,
+    teacherEmail: fallback.teacherEmail ?? existing?.teacherEmail ?? null,
+  };
 }
 
 /**
@@ -1043,10 +1093,10 @@ export async function registerUser(payload: {
   const role: 'estudiante' | 'profesor' = isTeacherRequest ? 'profesor' : 'estudiante';
   const fullName = `${payload.nombre.trim()} ${payload.apellido.trim()}`.trim();
 
-  let createdUserId: number | undefined;
+  let apiUser: ApiUser;
 
   try {
-    const apiUser = await api.register({
+    apiUser = await api.register({
       full_name: fullName,
       email: emailLower,
       cedula: payload.cedula.trim(),
@@ -1056,7 +1106,6 @@ export async function registerUser(payload: {
       mascot_name: payload.mascotSpecies,
       mascot_gender: payload.mascotGender,
     });
-    createdUserId = apiUser.id;
   } catch (err) {
     return {
       success: false,
@@ -1067,8 +1116,7 @@ export async function registerUser(payload: {
     };
   }
 
-  const newUser: RegisteredUser = {
-    id: createdUserId,
+  const newUser = mergeApiUserWithLocal(apiUser, {
     nombre: payload.nombre.trim(),
     apellido: payload.apellido.trim(),
     email: emailLower,
@@ -1089,7 +1137,7 @@ export async function registerUser(payload: {
       : (payload.teacherEmail?.trim().toLowerCase() ??
         getTeachersByTrayecto(payload.trayecto)[0]?.email ??
         null),
-  };
+  });
 
   const db = getUsersDb();
   db[emailLower] = newUser;
@@ -1107,12 +1155,12 @@ export async function registerUser(payload: {
   }
 
   setCurrentSession(newUser);
+  startSession(emailLower);
   return { success: true, user: newUser };
 }
 
 /**
- * Iniciar sesión: valida localmente si existe y, si no está en el equipo actual,
- * consulta la API / Neon para permitir acceso multi-dispositivo.
+ * Iniciar sesión consultando la API / Neon y respaldando cuentas locales/demo
  */
 export async function loginUser(email: string, password: string): Promise<AuthResult> {
   const emailLower = email.trim().toLowerCase();
@@ -1124,100 +1172,95 @@ export async function loginUser(email: string, password: string): Promise<AuthRe
     };
   }
 
-  let user = findUserByEmail(emailLower);
+  const localUser = findUserByEmail(emailLower);
 
-  if (!user) {
-    try {
-      const remoteUser = await api.login(emailLower);
-      const { nombre, apellido } = splitFullName(remoteUser.full_name || emailLower);
-      const normalizedRole: UserRole =
-        remoteUser.role === 'administrador' || remoteUser.role === 'superadmin' || isRootAdmin(emailLower)
-          ? 'administrador'
-          : remoteUser.role === 'profesor'
-          ? 'profesor'
-          : 'estudiante';
+  try {
+    const apiUser = await api.login(emailLower);
+    const merged = mergeApiUserWithLocal(apiUser, {
+      email: emailLower,
+      passwordHash: localUser?.passwordHash ?? '',
+    });
 
-      const normalizedApproval: ApprovalStatus =
-        remoteUser.approval_status === 'pendiente' || remoteUser.approval_status === 'pending'
-          ? 'pending'
-          : remoteUser.approval_status === 'rechazado' || remoteUser.approval_status === 'rejected'
-          ? 'rejected'
-          : 'approved';
+    if (localUser?.passwordHash && password) {
+      const providedHash = hashPassword(password);
+      if (localUser.passwordHash !== providedHash) {
+        return {
+          success: false,
+          error: 'La contraseña ingresada es incorrecta. Por favor verifica tus credenciales.',
+        };
+      }
+    }
 
-      user = {
-        id: remoteUser.id,
-        nombre,
-        apellido,
-        email: emailLower,
-        cedula: remoteUser.cedula || '00000000',
-        trayecto: remoteUser.trayecto || 'Trayecto I',
-        sectionId: remoteUser.section_id ?? null,
-        genero: 'masculino',
-        telefono: '04120000000',
-        passwordHash: hashPassword(password),
-        mascotSpecies: normalizeMascotSpecies(remoteUser.mascot_name),
-        mascotGender: normalizeMascotGender(remoteUser.mascot_gender),
-        registeredAt: remoteUser.created_at || new Date().toISOString(),
-        role: normalizedRole,
-        active: normalizedApproval === 'approved',
-        lastLogin: new Date().toISOString(),
-        approvalStatus: normalizedApproval,
-        teacherEmail:
-          normalizedRole === 'estudiante'
-            ? getTeachersByTrayecto(remoteUser.trayecto || 'Trayecto I')[0]?.email ?? null
-            : null,
-      };
-
-      const db = getUsersDb();
-      db[emailLower] = user;
-      saveUsersDb(db);
-    } catch {
+    if (merged.approvalStatus === 'pending') {
       return {
         success: false,
-        error: 'No existe ninguna cuenta registrada con este correo electrónico. Puedes crear tu cuenta en la pestaña "Crear Cuenta".',
+        error: '⏳ Tu cuenta docente está pendiente de autorización por el administrador. Recibirás acceso cuando sea aprobada.',
       };
     }
-  }
+    if (merged.approvalStatus === 'rejected') {
+      return {
+        success: false,
+        error: `❌ Tu solicitud de cuenta docente fue rechazada. Motivo: ${merged.rejectionReason ?? 'no especificado'}`,
+      };
+    }
+    if (merged.active === false) {
+      return {
+        success: false,
+        error: 'Tu cuenta ha sido desactivada. Contacta al administrador de la plataforma.',
+      };
+    }
 
-  const providedHash = hashPassword(password);
-  if (user.passwordHash !== providedHash) {
-    return {
-      success: false,
-      error: 'La contraseña ingresada es incorrecta. Por favor verifica tus credenciales.',
-    };
-  }
+    const db = getUsersDb();
+    db[emailLower] = merged;
+    saveUsersDb(db);
+    setCurrentSession(merged);
+    startSession(emailLower);
+    return { success: true, user: merged };
+  } catch (err) {
+    if (!localUser) {
+      return {
+        success: false,
+        error:
+          err instanceof Error && err.message
+            ? err.message
+            : 'No existe ninguna cuenta registrada con este correo electrónico. Puedes crear tu cuenta en la pestaña "Crear Cuenta".',
+      };
+    }
 
-  if (user.approvalStatus === 'pending') {
-    return {
-      success: false,
-      error: '⏳ Tu cuenta docente está pendiente de autorización por el administrador. Recibirás acceso cuando sea aprobada.',
-    };
-  }
-  if (user.approvalStatus === 'rejected') {
-    return {
-      success: false,
-      error: `❌ Tu solicitud de cuenta docente fue rechazada. Motivo: ${user.rejectionReason ?? 'no especificado'}`,
-    };
-  }
+    const providedHash = hashPassword(password);
+    if (localUser.passwordHash !== providedHash) {
+      return {
+        success: false,
+        error: 'La contraseña ingresada es incorrecta. Por favor verifica tus credenciales.',
+      };
+    }
 
-  if (user.active === false) {
-    return {
-      success: false,
-      error: 'Tu cuenta ha sido desactivada. Contacta al administrador de la plataforma.',
-    };
+    if (localUser.approvalStatus === 'pending') {
+      return {
+        success: false,
+        error: '⏳ Tu cuenta docente está pendiente de autorización por el administrador. Recibirás acceso cuando sea aprobada.',
+      };
+    }
+    if (localUser.approvalStatus === 'rejected') {
+      return {
+        success: false,
+        error: `❌ Tu solicitud de cuenta docente fue rechazada. Motivo: ${localUser.rejectionReason ?? 'no especificado'}`,
+      };
+    }
+    if (localUser.active === false) {
+      return {
+        success: false,
+        error: 'Tu cuenta ha sido desactivada. Contacta al administrador de la plataforma.',
+      };
+    }
+
+    const db = getUsersDb();
+    db[emailLower].lastLogin = new Date().toISOString();
+    saveUsersDb(db);
+    setCurrentSession(db[emailLower]);
+    startSession(emailLower);
+    return { success: true, user: db[emailLower] };
   }
-
-  void api.login(emailLower).catch(() => { /* ignore network errors */ });
-
-  const db = getUsersDb();
-  db[emailLower] = {
-    ...user,
-    lastLogin: new Date().toISOString(),
-  };
-  saveUsersDb(db);
-  setCurrentSession(db[emailLower]);
-  startSession(emailLower);
-  return { success: true, user: db[emailLower] };
 }
 
 export function getCurrentSession(): RegisteredUser | null {
@@ -1227,7 +1270,7 @@ export function getCurrentSession(): RegisteredUser | null {
     const user = JSON.parse(raw) as RegisteredUser;
     if (!user || !user.email) return null;
     const verified = findUserByEmail(user.email);
-    return verified || null;
+    return verified || user;
   } catch {
     return null;
   }
@@ -1280,7 +1323,6 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
     email:          existing.email,
     cedula:         existing.cedula,
     trayecto:       existing.trayecto,
-    sectionId:      existing.sectionId,
     genero:         existing.genero,
     teacherEmail:   existing.teacherEmail,
     role:           existing.role,
@@ -1347,61 +1389,3 @@ export function updateUserPassword(email: string, actualPwd: string, nuevaPwd: s
   setCurrentSession(existing);
   return { success: true, user: existing };
 }
-```[cite: 16]
-
----
-
-### Ajuste rápido que debes hacer en `AuthPage.tsx`
-Como `loginUser` y `registerUser` ahora devuelven `Promise<AuthResult>`, en `AuthPage.tsx` actualiza `submitLogin` y `submitRegister` así:
-
-```tsx
-  const submitLogin = async (ev: React.FormEvent) => {
-    ev.preventDefault();
-    setLoginErr('');
-    if (!loginEmail.trim() || !loginPwd) {
-      setLoginErr('Por favor ingresa tu correo electrónico y contraseña.');
-      playSound('error');
-      return;
-    }
-
-    const res = await loginUser(loginEmail, loginPwd);
-    if (!res.success) {
-      setLoginErr(res.error || 'Correo o contraseña incorrectos.');
-      playSound('error');
-      return;
-    }
-
-    playSound('boot');
-    onAuthSuccess(res.user!);
-  };
-
-  const submitRegister = async (ev: React.FormEvent) => {
-    ev.preventDefault();
-    setRegGeneralErr('');
-    if (!validate()) {
-      playSound('error');
-      return;
-    }
-
-    const res = await registerUser({
-      ...form,
-      sectionId: form.sectionId,
-      password,
-      requestedRole: reqRole,
-    });
-
-    if (!res.success) {
-      setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
-      playSound('error');
-      return;
-    }
-
-    if (reqRole === 'profesor') {
-      playSound('success');
-      setPendingNotice(form.email);
-      return;
-    }
-
-    playSound('boot');
-    onAuthSuccess(res.user!);
-  };
