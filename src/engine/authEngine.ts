@@ -78,7 +78,7 @@ export const TRAYECTO_META: Record<string, TrayectoMeta> = {
   'Trayecto IV':  { short: 'T-IV',  color: '#EF4444', icon: '🔴' },
 };
 
-/** Fallback seguro: los docentes pendientes aún no tienen Trayecto. */
+/** Fallback seguro: los docentes pendientes sin trayecto definido muestran S/A. */
 export const UNASSIGNED_TRAYECTO: TrayectoMeta = {
   short: 'S/A', color: '#64748b', icon: '⏳',
 };
@@ -97,7 +97,7 @@ export interface RegisteredUser {
   apellido: string;
   email: string;
   cedula: string;
-  /** Vacío para docentes hasta que el SuperAdmin les asigne sección */
+  /** Trayecto académico del usuario */
   trayecto: string;
   sectionId?: number | null;
   genero: string;
@@ -511,13 +511,14 @@ export function approveTeacher(
   if (user.role !== 'profesor') {
     return { success: false, error: 'Solo las cuentas docentes requieren autorización.' };
   }
-  if (!trayecto) {
+  const assignedTrayecto = trayecto?.trim() || user.trayecto || TRAYECTOS[0];
+  if (!assignedTrayecto) {
     return { success: false, error: 'Debes asignar un Trayecto al aprobar al docente.' };
   }
 
   user.approvalStatus = 'approved';
   user.active = true;
-  user.trayecto = trayecto;
+  user.trayecto = assignedTrayecto;
   user.reviewedBy = reviewerEmail.trim().toLowerCase();
   user.reviewedAt = new Date().toISOString();
   user.rejectionReason = null;
@@ -526,7 +527,7 @@ export function approveTeacher(
   pushNotification({
     type: 'teacher_approved',
     title: '✅ Cuenta docente autorizada',
-    body: `Tu solicitud fue aprobada. Se te asignó ${trayecto}. Ya puedes iniciar sesión.`,
+    body: `Tu solicitud fue aprobada. Se te asignó ${assignedTrayecto}. Ya puedes iniciar sesión.`,
     targetEmail: user.email,
     relatedEmail: user.email,
   });
@@ -566,7 +567,13 @@ export function rejectTeacher(
 
 export function getTeachersByTrayecto(trayecto: string): RegisteredUser[] {
   return Object.values(getUsersDb())
-    .filter((u) => u.role === 'profesor' && u.active && u.trayecto === trayecto)
+    .filter(
+      (u) =>
+        u.role === 'profesor' &&
+        u.active &&
+        u.approvalStatus === 'approved' &&
+        u.trayecto === trayecto,
+    )
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
 }
 
@@ -1011,7 +1018,7 @@ function mergeApiUserWithLocal(
     apellido,
     email: emailLower,
     cedula: (apiUser.cedula ?? fallback.cedula ?? existing?.cedula ?? '').trim(),
-    trayecto: apiUser.trayecto ?? fallback.trayecto ?? existing?.trayecto ?? 'Trayecto I',
+    trayecto: apiUser.trayecto || fallback.trayecto || existing?.trayecto || 'Trayecto I',
     sectionId: apiUser.section_id ?? fallback.sectionId ?? existing?.sectionId ?? null,
     genero: fallback.genero || existing?.genero || 'masculino',
     telefono: fallback.telefono?.trim() || existing?.telefono || '',
@@ -1092,6 +1099,7 @@ export async function registerUser(payload: {
   const isTeacherRequest = payload.requestedRole === 'profesor';
   const role: 'estudiante' | 'profesor' = isTeacherRequest ? 'profesor' : 'estudiante';
   const fullName = `${payload.nombre.trim()} ${payload.apellido.trim()}`.trim();
+  const chosenTrayecto = payload.trayecto || TRAYECTOS[0];
 
   let apiUser: ApiUser;
 
@@ -1101,7 +1109,7 @@ export async function registerUser(payload: {
       email: emailLower,
       cedula: payload.cedula.trim(),
       role,
-      trayecto: isTeacherRequest ? '' : payload.trayecto,
+      trayecto: chosenTrayecto,
       section_id: payload.sectionId ?? null,
       mascot_name: payload.mascotSpecies,
       mascot_gender: payload.mascotGender,
@@ -1121,7 +1129,7 @@ export async function registerUser(payload: {
     apellido: payload.apellido.trim(),
     email: emailLower,
     cedula: payload.cedula.trim(),
-    trayecto: isTeacherRequest ? '' : payload.trayecto,
+    trayecto: chosenTrayecto,
     sectionId: payload.sectionId ?? null,
     genero: payload.genero,
     telefono: payload.telefono.trim(),
@@ -1135,7 +1143,7 @@ export async function registerUser(payload: {
     teacherEmail: isTeacherRequest
       ? null
       : (payload.teacherEmail?.trim().toLowerCase() ??
-        getTeachersByTrayecto(payload.trayecto)[0]?.email ??
+        getTeachersByTrayecto(chosenTrayecto)[0]?.email ??
         null),
   });
 
@@ -1147,7 +1155,7 @@ export async function registerUser(payload: {
     pushNotification({
       type: 'teacher_request',
       title: 'Nueva solicitud de cuenta docente',
-      body: `${newUser.nombre} ${newUser.apellido} (C.I. ${newUser.cedula}) solicita acceso como docente.`,
+      body: `${newUser.nombre} ${newUser.apellido} (C.I. ${newUser.cedula}) solicita acceso como docente (${chosenTrayecto}).`,
       targetEmail: ROOT_ADMIN_EMAIL,
       relatedEmail: newUser.email,
     });
