@@ -88,10 +88,21 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
-app.get("/api/sections", async (_req, res) => {
+app.get("/api/sections", async (req, res) => {
   try {
+    const trayecto =
+      typeof req.query.trayecto === "string" ? req.query.trayecto.trim() : "";
+
+    if (trayecto) {
+      const result = await pool.query(
+        "SELECT * FROM sections WHERE is_active = TRUE AND trayecto = $1 ORDER BY name ASC, id ASC",
+        [trayecto]
+      );
+      return res.json({ sections: result.rows });
+    }
+
     const result = await pool.query(
-      "SELECT * FROM sections WHERE is_active = TRUE ORDER BY trayecto ASC, name ASC"
+      "SELECT * FROM sections WHERE is_active = TRUE ORDER BY trayecto ASC, name ASC, id ASC"
     );
     res.json({ sections: result.rows });
   } catch (err) {
@@ -239,6 +250,3 @@ initDatabase()
     console.error("Error iniciando base de datos:", err);
     process.exit(1);
   });
-```[cite: 14]
-
-Al hacer `push` a `main`, Render desplegará automáticamente `simulador-terminal-api` y poblará la tabla `sections` en Neon al arrancar[cite: 12, 14]. ¿Quieres que te muestre también cómo cargar esas secciones en tu formulario de registro?
