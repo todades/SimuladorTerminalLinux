@@ -99,6 +99,7 @@ export interface RegisteredUser {
   cedula: string;
   /** Vacío para docentes hasta que el SuperAdmin les asigne sección */
   trayecto: string;
+  sectionId?: number | null;
   genero: string;
   telefono: string;
   passwordHash: string;
@@ -960,6 +961,25 @@ export interface AuthResult {
   user?: RegisteredUser;
 }
 
+function splitFullName(fullName: string): { nombre: string; apellido: string } {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { nombre: 'Usuario', apellido: 'UPTA' };
+  if (parts.length === 1) return { nombre: parts[0], apellido: '' };
+  return { nombre: parts[0], apellido: parts.slice(1).join(' ') };
+}
+
+function normalizeMascotSpecies(raw?: string): MascotSpecies {
+  const val = (raw || '').toLowerCase();
+  if (val === 'zorro' || val === 'vulpix') return 'zorro';
+  if (val === 'buho' || val === 'athena') return 'buho';
+  if (val === 'dragon' || val === 'ignis') return 'dragon';
+  return 'pinguino';
+}
+
+function normalizeMascotGender(raw?: string): MascotGender {
+  return raw === 'femenino' ? 'femenino' : 'masculino';
+}
+
 /**
  * Registrar un nuevo usuario sincronizando con la API / Neon PostgreSQL
  */
@@ -1054,6 +1074,7 @@ export async function registerUser(payload: {
     email: emailLower,
     cedula: payload.cedula.trim(),
     trayecto: isTeacherRequest ? '' : payload.trayecto,
+    sectionId: payload.sectionId ?? null,
     genero: payload.genero,
     telefono: payload.telefono.trim(),
     passwordHash: hashPassword(payload.password),
@@ -1090,9 +1111,10 @@ export async function registerUser(payload: {
 }
 
 /**
- * Iniciar sesión comprobando correo y contraseña en la base de datos de usuarios registrados
+ * Iniciar sesión: valida localmente si existe y, si no está en el equipo actual,
+ * consulta la API / Neon para permitir acceso multi-dispositivo.
  */
-export function loginUser(email: string, password: string): AuthResult {
+export async function loginUser(email: string, password: string): Promise<AuthResult> {
   const emailLower = email.trim().toLowerCase();
 
   if (!/^[a-zA-Z0-9._%+\-]+@gmail\.com$/.test(emailLower)) {
@@ -1102,13 +1124,59 @@ export function loginUser(email: string, password: string): AuthResult {
     };
   }
 
-  const user = findUserByEmail(emailLower);
+  let user = findUserByEmail(emailLower);
 
   if (!user) {
-    return {
-      success: false,
-      error: 'No existe ninguna cuenta registrada con este correo electrónico. Puedes crear tu cuenta en la pestaña "Crear Cuenta".',
-    };
+    try {
+      const remoteUser = await api.login(emailLower);
+      const { nombre, apellido } = splitFullName(remoteUser.full_name || emailLower);
+      const normalizedRole: UserRole =
+        remoteUser.role === 'administrador' || remoteUser.role === 'superadmin' || isRootAdmin(emailLower)
+          ? 'administrador'
+          : remoteUser.role === 'profesor'
+          ? 'profesor'
+          : 'estudiante';
+
+      const normalizedApproval: ApprovalStatus =
+        remoteUser.approval_status === 'pendiente' || remoteUser.approval_status === 'pending'
+          ? 'pending'
+          : remoteUser.approval_status === 'rechazado' || remoteUser.approval_status === 'rejected'
+          ? 'rejected'
+          : 'approved';
+
+      user = {
+        id: remoteUser.id,
+        nombre,
+        apellido,
+        email: emailLower,
+        cedula: remoteUser.cedula || '00000000',
+        trayecto: remoteUser.trayecto || 'Trayecto I',
+        sectionId: remoteUser.section_id ?? null,
+        genero: 'masculino',
+        telefono: '04120000000',
+        passwordHash: hashPassword(password),
+        mascotSpecies: normalizeMascotSpecies(remoteUser.mascot_name),
+        mascotGender: normalizeMascotGender(remoteUser.mascot_gender),
+        registeredAt: remoteUser.created_at || new Date().toISOString(),
+        role: normalizedRole,
+        active: normalizedApproval === 'approved',
+        lastLogin: new Date().toISOString(),
+        approvalStatus: normalizedApproval,
+        teacherEmail:
+          normalizedRole === 'estudiante'
+            ? getTeachersByTrayecto(remoteUser.trayecto || 'Trayecto I')[0]?.email ?? null
+            : null,
+      };
+
+      const db = getUsersDb();
+      db[emailLower] = user;
+      saveUsersDb(db);
+    } catch {
+      return {
+        success: false,
+        error: 'No existe ninguna cuenta registrada con este correo electrónico. Puedes crear tu cuenta en la pestaña "Crear Cuenta".',
+      };
+    }
   }
 
   const providedHash = hashPassword(password);
@@ -1139,8 +1207,13 @@ export function loginUser(email: string, password: string): AuthResult {
     };
   }
 
+  void api.login(emailLower).catch(() => { /* ignore network errors */ });
+
   const db = getUsersDb();
-  db[emailLower].lastLogin = new Date().toISOString();
+  db[emailLower] = {
+    ...user,
+    lastLogin: new Date().toISOString(),
+  };
   saveUsersDb(db);
   setCurrentSession(db[emailLower]);
   startSession(emailLower);
@@ -1207,6 +1280,7 @@ export function updateUserProfile(email: string, updates: Partial<RegisteredUser
     email:          existing.email,
     cedula:         existing.cedula,
     trayecto:       existing.trayecto,
+    sectionId:      existing.sectionId,
     genero:         existing.genero,
     teacherEmail:   existing.teacherEmail,
     role:           existing.role,
@@ -1273,3 +1347,61 @@ export function updateUserPassword(email: string, actualPwd: string, nuevaPwd: s
   setCurrentSession(existing);
   return { success: true, user: existing };
 }
+```[cite: 16]
+
+---
+
+### Ajuste rápido que debes hacer en `AuthPage.tsx`
+Como `loginUser` y `registerUser` ahora devuelven `Promise<AuthResult>`, en `AuthPage.tsx` actualiza `submitLogin` y `submitRegister` así:
+
+```tsx
+  const submitLogin = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    setLoginErr('');
+    if (!loginEmail.trim() || !loginPwd) {
+      setLoginErr('Por favor ingresa tu correo electrónico y contraseña.');
+      playSound('error');
+      return;
+    }
+
+    const res = await loginUser(loginEmail, loginPwd);
+    if (!res.success) {
+      setLoginErr(res.error || 'Correo o contraseña incorrectos.');
+      playSound('error');
+      return;
+    }
+
+    playSound('boot');
+    onAuthSuccess(res.user!);
+  };
+
+  const submitRegister = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    setRegGeneralErr('');
+    if (!validate()) {
+      playSound('error');
+      return;
+    }
+
+    const res = await registerUser({
+      ...form,
+      sectionId: form.sectionId,
+      password,
+      requestedRole: reqRole,
+    });
+
+    if (!res.success) {
+      setRegGeneralErr(res.error || 'No se pudo crear la cuenta.');
+      playSound('error');
+      return;
+    }
+
+    if (reqRole === 'profesor') {
+      playSound('success');
+      setPendingNotice(form.email);
+      return;
+    }
+
+    playSound('boot');
+    onAuthSuccess(res.user!);
+  };
